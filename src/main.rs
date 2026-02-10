@@ -15,6 +15,7 @@ mod pic;
 mod reboot;
 mod serial;
 mod shell;
+mod shutdown;
 mod timer;
 pub mod vga;
 

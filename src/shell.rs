@@ -9,6 +9,7 @@ use crate::{
     println,
     reboot,
     serial,
+    shutdown,
     timer,
     vga,
 };
@@ -112,7 +113,7 @@ pub fn run() -> ! {
                 KeyEvent::Char('\x08') => {
                     if len > 0 {
                         len -= 1;
-                        vga::backspace();
+                        erase_input_char();
                     }
                 }
                 KeyEvent::Char(ch) => {
@@ -219,6 +220,7 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("  matrix - matrix rain (press any key to exit)");
             shell_println!("  color - set text colors");
             shell_println!("  reboot - reboot machine");
+            shell_println!("  shutdown - power off machine");
             shell_println!("  panic - trigger kernel panic");
             shell_println!("History: use Up/Down arrows");
         }
@@ -239,7 +241,7 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("codexOS barebones kernel");
             shell_println!("arch: x86 (32-bit)");
             shell_println!("lang: Rust + inline assembly");
-            shell_println!("boot: Multiboot/GRUB");
+            shell_println!("boot: custom BIOS bootloader");
             shell_println!("features: VGA, IDT, IRQ keyboard, IRQ mouse, PIT, shell, heap");
             shell_println!("uptime: {}.{:03}s", up.seconds, up.millis);
         }
@@ -283,6 +285,10 @@ fn execute_line(bytes: &[u8]) {
         "reboot" => {
             shell_println!("Rebooting...");
             reboot::reboot();
+        }
+        "shutdown" => {
+            shell_println!("Shutting down...");
+            shutdown::shutdown();
         }
         "panic" => {
             panic!("panic command invoked from shell");
@@ -328,7 +334,7 @@ fn navigate_history_down<'a>(
 fn set_input_line(line: &mut [u8; MAX_LINE], len: &mut usize, replacement: &[u8]) {
     while *len > 0 {
         *len -= 1;
-        vga::backspace();
+        erase_input_char();
     }
 
     let copy_len = replacement.len().min(MAX_LINE);
@@ -338,6 +344,11 @@ fn set_input_line(line: &mut [u8; MAX_LINE], len: &mut usize, replacement: &[u8]
         *len += 1;
         shell_print!("{}", byte as char);
     }
+}
+
+fn erase_input_char() {
+    vga::backspace();
+    serial::write_str("\x08 \x08");
 }
 
 fn print_date() {

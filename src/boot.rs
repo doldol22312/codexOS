@@ -2,20 +2,11 @@ use core::arch::global_asm;
 
 global_asm!(
     r#"
-    .set MB_MAGIC, 0x1BADB002
-    .set MB_FLAGS, 0x00000003
-    .set MB_CHECKSUM, -(MB_MAGIC + MB_FLAGS)
-
-    .section .multiboot, "a"
-    .align 4
-    .long MB_MAGIC
-    .long MB_FLAGS
-    .long MB_CHECKSUM
-
-    .section .text
+    .section .text.boot, "ax"
     .global _start
 _start:
     cli
+    cld
     lea esp, [stack_top]
     call zero_bss
     call kernel_main

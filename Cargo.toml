@@ -2,8 +2,28 @@
 name = "codex_os"
 version = "0.1.0"
 edition = "2021"
+autobins = false
 
 [dependencies]
+
+[features]
+default = []
+bootloader-stage1 = []
+bootloader-stage2 = []
+
+[[bin]]
+name = "codex_os"
+path = "src/main.rs"
+
+[[bin]]
+name = "boot_stage1"
+path = "src/bin/boot_stage1.rs"
+required-features = ["bootloader-stage1"]
+
+[[bin]]
+name = "boot_stage2"
+path = "src/bin/boot_stage2.rs"
+required-features = ["bootloader-stage2"]
 
 [profile.dev]
 panic = "abort"

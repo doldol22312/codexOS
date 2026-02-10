@@ -1,33 +1,85 @@
 TARGET_JSON := i686-codex_os.json
 TARGET_TRIPLE := i686-codex_os
 PROFILE ?= debug
-KERNEL := target/$(TARGET_TRIPLE)/$(PROFILE)/codex_os
-ISO_DIR := build/isofiles
-ISO_PATH := build/codexos.iso
 QEMU := qemu-system-i386
 
-.PHONY: all build iso run run-iso run-serial clean
+BUILD_DIR := build
+BUILD_STAMP := $(BUILD_DIR)/.dir
+IMG_PATH := $(BUILD_DIR)/codexos.img
+
+KERNEL_ELF := target/$(TARGET_TRIPLE)/$(PROFILE)/codex_os
+STAGE1_ELF := target/$(TARGET_TRIPLE)/$(PROFILE)/boot_stage1
+STAGE2_ELF := target/$(TARGET_TRIPLE)/$(PROFILE)/boot_stage2
+
+KERNEL_BIN := $(BUILD_DIR)/kernel.bin
+STAGE1_BIN := $(BUILD_DIR)/boot_stage1.bin
+STAGE2_BIN := $(BUILD_DIR)/boot_stage2.bin
+
+FLOPPY_SECTORS := 2880
+STAGE2_SECTORS := 32
+KERNEL_SECTORS := 1024
+KERNEL_LBA := 33
+
+CARGO_FLAGS := -Zjson-target-spec -Zbuild-std=core,alloc,compiler_builtins -Zbuild-std-features=compiler-builtins-mem --target $(TARGET_JSON)
+
+PROFILE_FLAG :=
+ifeq ($(PROFILE),release)
+PROFILE_FLAG := --release
+endif
+
+.PHONY: all build kernel stage1 stage2 image run run-serial clean
 
 all: build
 
-build:
-	cargo +nightly build -Zjson-target-spec -Zbuild-std=core,alloc,compiler_builtins -Zbuild-std-features=compiler-builtins-mem --target $(TARGET_JSON)
+build: image
 
-iso: build
-	mkdir -p $(ISO_DIR)/boot/grub
-	cp $(KERNEL) $(ISO_DIR)/boot/kernel.elf
-	cp grub.cfg $(ISO_DIR)/boot/grub/grub.cfg
-	grub-mkrescue -o $(ISO_PATH) $(ISO_DIR)
+$(BUILD_STAMP):
+	mkdir -p $(BUILD_DIR)
+	touch $(BUILD_STAMP)
 
-run: iso
-	$(QEMU) -cdrom $(ISO_PATH) -m 128M
+kernel: | $(BUILD_STAMP)
+	cargo +nightly rustc $(CARGO_FLAGS) $(PROFILE_FLAG) --bin codex_os
 
-run-iso: iso
-	$(QEMU) -cdrom $(ISO_PATH) -m 128M
+stage1: | $(BUILD_STAMP)
+	cargo +nightly rustc $(CARGO_FLAGS) $(PROFILE_FLAG) --features bootloader-stage1 --bin boot_stage1 -- -C link-arg=-Tstage1.ld
 
-run-serial: iso
-	$(QEMU) -cdrom $(ISO_PATH) -m 128M -display none -serial stdio -monitor none -no-reboot -no-shutdown
+stage2: | $(BUILD_STAMP)
+	cargo +nightly rustc $(CARGO_FLAGS) $(PROFILE_FLAG) --features bootloader-stage2 --bin boot_stage2 -- -C link-arg=-Tstage2.ld
+
+$(STAGE1_BIN): stage1 | $(BUILD_STAMP)
+	objcopy -O binary $(STAGE1_ELF) $(STAGE1_BIN)
+	@if [ $$(stat -c%s $(STAGE1_BIN)) -ne 512 ]; then \
+		echo "boot_stage1 must be exactly 512 bytes"; \
+		exit 1; \
+	fi
+
+$(STAGE2_BIN): stage2 | $(BUILD_STAMP)
+	objcopy -O binary $(STAGE2_ELF) $(STAGE2_BIN)
+	@if [ $$(stat -c%s $(STAGE2_BIN)) -gt $$(( $(STAGE2_SECTORS) * 512 )) ]; then \
+		echo "boot_stage2 is too large (max $(STAGE2_SECTORS) sectors)"; \
+		exit 1; \
+	fi
+
+$(KERNEL_BIN): kernel | $(BUILD_STAMP)
+	objcopy -O binary $(KERNEL_ELF) $(KERNEL_BIN)
+	@if [ $$(stat -c%s $(KERNEL_BIN)) -gt $$(( $(KERNEL_SECTORS) * 512 )) ]; then \
+		echo "kernel.bin is too large (max $(KERNEL_SECTORS) sectors)"; \
+		exit 1; \
+	fi
+
+image: $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) | $(BUILD_STAMP)
+	dd if=/dev/zero of=$(IMG_PATH) bs=512 count=$(FLOPPY_SECTORS) status=none
+	dd if=$(STAGE1_BIN) of=$(IMG_PATH) bs=512 seek=0 conv=notrunc status=none
+	dd if=$(STAGE2_BIN) of=$(IMG_PATH) bs=512 seek=1 conv=notrunc status=none
+	dd if=$(KERNEL_BIN) of=$(IMG_PATH) bs=512 seek=$(KERNEL_LBA) conv=notrunc status=none
+	@echo "Built boot image: $(IMG_PATH)"
+
+run: image
+	$(QEMU) -drive format=raw,file=$(IMG_PATH),if=floppy -boot a -m 128M
+
+run-serial: image
+	$(QEMU) -drive format=raw,file=$(IMG_PATH),if=floppy -boot a -m 128M -display none -serial stdio -monitor none -no-reboot -no-shutdown
 
 clean:
-	rm -rf build
+	rm -rf $(BUILD_DIR)
 	cargo +nightly clean
