@@ -10,7 +10,10 @@ mod interrupts;
 mod io;
 mod keyboard;
 mod pic;
+mod reboot;
+mod serial;
 mod shell;
+mod timer;
 pub mod vga;
 
 use core::alloc::Layout;
@@ -18,18 +21,32 @@ use core::panic::PanicInfo;
 
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
+    serial::init();
+    serial_println!("serial: initialized");
+
+    vga::set_color(0x0F, 0x00);
     vga::clear_screen();
     println!("codexOS booting...");
+    serial_println!("boot: vga ready");
+
     gdt::init();
+    serial_println!("boot: gdt ready");
     idt::init();
+    serial_println!("boot: idt ready");
     pic::init();
+    serial_println!("boot: pic ready");
+    timer::init(100);
+    serial_println!("boot: pit ready ({}hz)", timer::frequency_hz());
     keyboard::init();
+    serial_println!("boot: keyboard ready");
 
     unsafe {
         core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
     }
+    serial_println!("boot: interrupts enabled");
 
     println!("Interrupts online. Starting shell.");
+    serial_println!("boot: entering shell");
     shell::run();
 }
 
@@ -44,6 +61,7 @@ fn alloc_error(layout: Layout) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
+    serial_println!("KERNEL PANIC: {}", info);
     println!();
     println!("KERNEL PANIC");
     println!("{}", info);

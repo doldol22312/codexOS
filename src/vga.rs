@@ -11,6 +11,7 @@ const VGA_CRTC_DATA: u16 = 0x3D5;
 
 static mut CURSOR_ROW: usize = 0;
 static mut CURSOR_COL: usize = 0;
+static mut CURRENT_COLOR: u8 = DEFAULT_COLOR;
 
 #[inline]
 const fn vga_entry(ch: u8, color: u8) -> u16 {
@@ -46,11 +47,40 @@ fn enable_hardware_cursor() {
     }
 }
 
+#[inline]
+fn current_color() -> u8 {
+    unsafe { CURRENT_COLOR }
+}
+
+pub fn color_code() -> u8 {
+    current_color()
+}
+
+pub fn foreground_color() -> u8 {
+    color_code() & 0x0F
+}
+
+pub fn background_color() -> u8 {
+    (color_code() >> 4) & 0x0F
+}
+
+pub fn set_color(foreground: u8, background: u8) {
+    unsafe {
+        CURRENT_COLOR = ((background & 0x0F) << 4) | (foreground & 0x0F);
+    }
+}
+
+pub fn set_color_code(color: u8) {
+    unsafe {
+        CURRENT_COLOR = color;
+    }
+}
+
 pub fn clear_screen() {
     unsafe {
         for row in 0..BUFFER_HEIGHT {
             for col in 0..BUFFER_WIDTH {
-                write_cell(row, col, vga_entry(b' ', DEFAULT_COLOR));
+                write_cell(row, col, vga_entry(b' ', current_color()));
             }
         }
         CURSOR_ROW = 0;
@@ -70,7 +100,7 @@ pub fn scroll() {
         }
 
         for col in 0..BUFFER_WIDTH {
-            write_cell(BUFFER_HEIGHT - 1, col, vga_entry(b' ', DEFAULT_COLOR));
+            write_cell(BUFFER_HEIGHT - 1, col, vga_entry(b' ', current_color()));
         }
 
         if CURSOR_ROW > 0 {
@@ -91,7 +121,7 @@ pub fn backspace() {
             return;
         }
 
-        write_cell(CURSOR_ROW, CURSOR_COL, vga_entry(b' ', DEFAULT_COLOR));
+        write_cell(CURSOR_ROW, CURSOR_COL, vga_entry(b' ', current_color()));
     }
     sync_hardware_cursor();
 }
@@ -111,7 +141,7 @@ pub fn put_char(ch: char) {
                 return;
             }
             _ => {
-                write_cell(CURSOR_ROW, CURSOR_COL, vga_entry(ch as u8, DEFAULT_COLOR));
+                write_cell(CURSOR_ROW, CURSOR_COL, vga_entry(ch as u8, current_color()));
                 CURSOR_COL += 1;
                 if CURSOR_COL >= BUFFER_WIDTH {
                     CURSOR_COL = 0;

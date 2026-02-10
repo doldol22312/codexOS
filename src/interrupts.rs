@@ -1,6 +1,7 @@
 use core::arch::global_asm;
 
-use crate::{keyboard, pic, println};
+use crate::{keyboard, pic, println, timer};
+use crate::serial_println;
 
 #[repr(C)]
 pub struct InterruptFrame {
@@ -184,11 +185,15 @@ pub extern "C" fn interrupt_dispatch(frame: *mut InterruptFrame) {
 
     match vector {
         0..=31 => handle_exception(frame),
+        32 => {
+            timer::handle_interrupt();
+            pic::send_eoi(0);
+        }
         33 => {
             keyboard::handle_interrupt();
             pic::send_eoi(1);
         }
-        32..=47 => {
+        34..=47 => {
             pic::send_eoi(vector - 32);
         }
         _ => {}
@@ -197,6 +202,12 @@ pub extern "C" fn interrupt_dispatch(frame: *mut InterruptFrame) {
 
 fn handle_exception(frame: &InterruptFrame) -> ! {
     let vector = frame.int_no as usize;
+    serial_println!(
+        "exception: vec={} err={:#x} eip={:#x}",
+        vector,
+        frame.err_code,
+        frame.eip
+    );
     println!();
     println!("EXCEPTION {}: {}", vector, EXCEPTION_MESSAGES[vector]);
     println!("err={} eip={:#010x}", frame.err_code, frame.eip);

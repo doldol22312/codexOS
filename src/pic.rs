@@ -37,7 +37,7 @@ pub fn init() {
         io_wait();
 
         let _ = saved_mask2;
-        outb(PIC1_DATA, saved_mask1 & !(1 << 1));
+        outb(PIC1_DATA, saved_mask1 & !((1 << 0) | (1 << 1)));
         outb(PIC2_DATA, 0xFF);
     }
 }

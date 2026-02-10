@@ -6,7 +6,7 @@ ISO_DIR := build/isofiles
 ISO_PATH := build/codexos.iso
 QEMU := qemu-system-i386
 
-.PHONY: all build iso run run-iso clean
+.PHONY: all build iso run run-iso run-serial clean
 
 all: build
 
@@ -24,6 +24,9 @@ run: iso
 
 run-iso: iso
 	$(QEMU) -cdrom $(ISO_PATH) -m 128M
+
+run-serial: iso
+	$(QEMU) -cdrom $(ISO_PATH) -m 128M -display none -serial stdio -monitor none -no-reboot -no-shutdown
 
 clean:
 	rm -rf build

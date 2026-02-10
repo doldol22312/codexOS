@@ -25,11 +25,6 @@ SECTIONS
         *(.data .data.*)
     }
 
-    .boot_stack ALIGN(16) (NOLOAD) :
-    {
-        *(.boot_stack)
-    }
-
     .bss ALIGN(4K) :
     {
         __bss_start = .;
@@ -42,6 +37,13 @@ SECTIONS
     __heap_start = .;
     . = . + 512K;
     __heap_end = .;
+
+    .boot_stack ALIGN(16) (NOLOAD) :
+    {
+        stack_bottom = .;
+        . = . + 1M;
+        stack_top = .;
+    }
 
     /DISCARD/ :
     {

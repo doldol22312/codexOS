@@ -22,12 +22,6 @@ _start:
 1:
     hlt
     jmp 1b
-
-    .section .boot_stack, "aw", @nobits
-    .align 16
-stack_bottom:
-    .skip 16384
-stack_top:
 "#
 );
 

@@ -1,12 +1,22 @@
 use crate::io::inb;
 
 const BUFFER_SIZE: usize = 256;
+const EVENT_UP: u8 = 0x80;
+const EVENT_DOWN: u8 = 0x81;
 
 static mut BUFFER: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
 static mut HEAD: usize = 0;
 static mut TAIL: usize = 0;
 static mut SHIFT: bool = false;
 static mut CAPS_LOCK: bool = false;
+static mut EXTENDED: bool = false;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyEvent {
+    Char(char),
+    Up,
+    Down,
+}
 
 pub fn init() {}
 
@@ -18,11 +28,30 @@ pub fn handle_interrupt() {
 fn process_scancode(scancode: u8) {
     unsafe {
         if scancode == 0xE0 {
+            EXTENDED = true;
             return;
         }
 
         let released = (scancode & 0x80) != 0;
         let key = scancode & 0x7F;
+
+        if EXTENDED {
+            EXTENDED = false;
+            if released {
+                return;
+            }
+
+            match key {
+                0x48 => {
+                    push_byte(EVENT_UP);
+                }
+                0x50 => {
+                    push_byte(EVENT_DOWN);
+                }
+                _ => {}
+            }
+            return;
+        }
 
         match key {
             0x2A | 0x36 => {
@@ -150,6 +179,12 @@ fn pop_byte() -> Option<u8> {
     }
 }
 
-pub fn read_char() -> Option<char> {
-    pop_byte().map(|b| b as char)
+pub fn read_key() -> Option<KeyEvent> {
+    let byte = pop_byte()?;
+    match byte {
+        EVENT_UP => Some(KeyEvent::Up),
+        EVENT_DOWN => Some(KeyEvent::Down),
+        _ if byte < 0x80 => Some(KeyEvent::Char(byte as char)),
+        _ => None,
+    }
 }
