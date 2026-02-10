@@ -1,0 +1,14 @@
+# Rust build output
+/target/
+
+# Generated bootable artifacts
+/build/
+*.iso
+
+# Local run/debug logs
+qemu-reset.log
+*.log
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db

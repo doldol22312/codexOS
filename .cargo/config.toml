@@ -1,0 +1,18 @@
+[build]
+target = "i686-codex_os.json"
+
+[unstable]
+build-std = ["core", "alloc", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]
+
+[target.i686-codex_os]
+rustflags = [
+    "-C",
+    "link-arg=-Tlinker.ld",
+    "-C",
+    "link-arg=-nostdlib",
+    "-C",
+    "link-arg=--no-dynamic-linker",
+    "-C",
+    "link-arg=-zmax-page-size=0x1000",
+]
