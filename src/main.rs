@@ -3,13 +3,13 @@
 #![feature(alloc_error_handler)]
 
 mod allocator;
-mod beep;
 mod boot;
 mod gdt;
 mod idt;
 mod interrupts;
 mod io;
 mod keyboard;
+mod matrix;
 mod mouse;
 mod pic;
 mod reboot;
@@ -48,9 +48,6 @@ pub extern "C" fn kernel_main() -> ! {
         core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
     }
     serial_println!("boot: interrupts enabled");
-
-    beep::startup_sound();
-    serial_println!("boot: startup sound done");
 
     println!("Interrupts online. Starting shell.");
     serial_println!("boot: entering shell");

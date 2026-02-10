@@ -2,8 +2,8 @@ use core::str;
 
 use crate::{
     allocator,
-    beep,
     keyboard::{self, KeyEvent},
+    matrix,
     mouse,
     print,
     println,
@@ -216,7 +216,7 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("  memtest [bytes] - test free heap memory");
             shell_println!("  hexdump <addr> [len] - dump memory");
             shell_println!("  mouse - show mouse position/buttons");
-            shell_println!("  beep [hz] [ms] - play PC speaker tone");
+            shell_println!("  matrix - matrix rain (press any key to exit)");
             shell_println!("  color - set text colors");
             shell_println!("  reboot - reboot machine");
             shell_println!("  panic - trigger kernel panic");
@@ -240,7 +240,7 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("arch: x86 (32-bit)");
             shell_println!("lang: Rust + inline assembly");
             shell_println!("boot: Multiboot/GRUB");
-            shell_println!("features: VGA, IDT, IRQ keyboard, IRQ mouse, PIT, speaker, shell, heap");
+            shell_println!("features: VGA, IDT, IRQ keyboard, IRQ mouse, PIT, shell, heap");
             shell_println!("uptime: {}.{:03}s", up.seconds, up.millis);
         }
         "date" => print_date(),
@@ -273,7 +273,10 @@ fn execute_line(bytes: &[u8]) {
                 if state.right { 1 } else { 0 }
             );
         }
-        "beep" => handle_beep_command(parts),
+        "matrix" => {
+            shell_println!("matrix mode: press any key to return");
+            matrix::run();
+        }
         "color" => {
             handle_color_command(parts);
         }
@@ -452,34 +455,6 @@ where
         }
         shell_println!("|");
     }
-}
-
-fn handle_beep_command<'a, I>(mut parts: I)
-where
-    I: Iterator<Item = &'a str>,
-{
-    let frequency_hz = if let Some(token) = parts.next() {
-        let Some(value) = parse_u32(token) else {
-            shell_println!("invalid frequency: {}", token);
-            return;
-        };
-        value.max(1)
-    } else {
-        880
-    };
-
-    let duration_ms = if let Some(token) = parts.next() {
-        let Some(value) = parse_u32(token) else {
-            shell_println!("invalid duration: {}", token);
-            return;
-        };
-        value.max(1)
-    } else {
-        120
-    };
-
-    shell_println!("beep: {} Hz for {} ms", frequency_hz, duration_ms);
-    beep::play(frequency_hz, duration_ms);
 }
 
 fn parse_u32(token: &str) -> Option<u32> {
