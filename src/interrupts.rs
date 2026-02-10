@@ -1,6 +1,6 @@
 use core::arch::global_asm;
 
-use crate::{keyboard, pic, println, timer};
+use crate::{keyboard, mouse, pic, println, timer};
 use crate::serial_println;
 
 #[repr(C)]
@@ -192,6 +192,10 @@ pub extern "C" fn interrupt_dispatch(frame: *mut InterruptFrame) {
         33 => {
             keyboard::handle_interrupt();
             pic::send_eoi(1);
+        }
+        44 => {
+            mouse::handle_interrupt();
+            pic::send_eoi(12);
         }
         34..=47 => {
             pic::send_eoi(vector - 32);

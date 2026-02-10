@@ -3,12 +3,14 @@
 #![feature(alloc_error_handler)]
 
 mod allocator;
+mod beep;
 mod boot;
 mod gdt;
 mod idt;
 mod interrupts;
 mod io;
 mod keyboard;
+mod mouse;
 mod pic;
 mod reboot;
 mod serial;
@@ -39,11 +41,16 @@ pub extern "C" fn kernel_main() -> ! {
     serial_println!("boot: pit ready ({}hz)", timer::frequency_hz());
     keyboard::init();
     serial_println!("boot: keyboard ready");
+    mouse::init();
+    serial_println!("boot: mouse ready");
 
     unsafe {
         core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
     }
     serial_println!("boot: interrupts enabled");
+
+    beep::startup_sound();
+    serial_println!("boot: startup sound done");
 
     println!("Interrupts online. Starting shell.");
     serial_println!("boot: entering shell");

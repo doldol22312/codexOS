@@ -58,6 +58,14 @@ pub struct HeapStats {
     pub remaining: usize,
 }
 
+#[derive(Clone, Copy)]
+pub struct MemTestResult {
+    pub start: usize,
+    pub tested: usize,
+    pub failures: u32,
+    pub first_failure_addr: Option<usize>,
+}
+
 pub fn stats() -> HeapStats {
     unsafe {
         let heap_start = core::ptr::addr_of!(__heap_start) as usize;
@@ -72,6 +80,70 @@ pub fn stats() -> HeapStats {
             total: heap_end.saturating_sub(heap_start),
             remaining: heap_end.saturating_sub(current),
         }
+    }
+}
+
+pub fn memtest(requested_bytes: usize) -> MemTestResult {
+    const PATTERN_A: u32 = 0xAA55_AA55;
+    const PATTERN_B: u32 = 0x55AA_55AA;
+
+    let heap = stats();
+    let start = heap.start + heap.used;
+    let tested = requested_bytes.min(heap.remaining);
+    let words = tested / 4;
+    let tail = tested % 4;
+
+    let mut failures = 0u32;
+    let mut first_failure_addr = None;
+
+    unsafe {
+        for index in 0..words {
+            let pointer = (start + index * 4) as *mut u32;
+            pointer.write_volatile(PATTERN_A);
+        }
+
+        for index in 0..words {
+            let pointer = (start + index * 4) as *const u32;
+            if pointer.read_volatile() != PATTERN_A {
+                failures = failures.saturating_add(1);
+                if first_failure_addr.is_none() {
+                    first_failure_addr = Some(start + index * 4);
+                }
+            }
+        }
+
+        for index in 0..words {
+            let pointer = (start + index * 4) as *mut u32;
+            pointer.write_volatile(PATTERN_B);
+        }
+
+        for index in 0..words {
+            let pointer = (start + index * 4) as *const u32;
+            if pointer.read_volatile() != PATTERN_B {
+                failures = failures.saturating_add(1);
+                if first_failure_addr.is_none() {
+                    first_failure_addr = Some(start + index * 4);
+                }
+            }
+        }
+
+        for offset in 0..tail {
+            let pointer = (start + words * 4 + offset) as *mut u8;
+            pointer.write_volatile(0xA5);
+            if (pointer as *const u8).read_volatile() != 0xA5 {
+                failures = failures.saturating_add(1);
+                if first_failure_addr.is_none() {
+                    first_failure_addr = Some(start + words * 4 + offset);
+                }
+            }
+        }
+    }
+
+    MemTestResult {
+        start,
+        tested,
+        failures,
+        first_failure_addr,
     }
 }
 

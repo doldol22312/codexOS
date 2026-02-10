@@ -2,7 +2,9 @@ use core::str;
 
 use crate::{
     allocator,
+    beep,
     keyboard::{self, KeyEvent},
+    mouse,
     print,
     println,
     reboot,
@@ -13,6 +15,10 @@ use crate::{
 
 const MAX_LINE: usize = 256;
 const HISTORY_SIZE: usize = 32;
+
+unsafe extern "C" {
+    static __heap_end: u8;
+}
 
 macro_rules! shell_print {
     ($($arg:tt)*) => {{
@@ -203,10 +209,17 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("  clear - clear screen");
             shell_println!("  echo  - echo arguments");
             shell_println!("  info  - show system info");
+            shell_println!("  date  - show date from PIT ticks");
+            shell_println!("  time  - show time from PIT ticks");
             shell_println!("  uptime - show kernel uptime");
             shell_println!("  heap  - show heap usage");
+            shell_println!("  memtest [bytes] - test free heap memory");
+            shell_println!("  hexdump <addr> [len] - dump memory");
+            shell_println!("  mouse - show mouse position/buttons");
+            shell_println!("  beep [hz] [ms] - play PC speaker tone");
             shell_println!("  color - set text colors");
             shell_println!("  reboot - reboot machine");
+            shell_println!("  panic - trigger kernel panic");
             shell_println!("History: use Up/Down arrows");
         }
         "clear" => vga::clear_screen(),
@@ -227,9 +240,11 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("arch: x86 (32-bit)");
             shell_println!("lang: Rust + inline assembly");
             shell_println!("boot: Multiboot/GRUB");
-            shell_println!("features: VGA, IDT, IRQ keyboard, PIT, shell, heap");
+            shell_println!("features: VGA, IDT, IRQ keyboard, IRQ mouse, PIT, speaker, shell, heap");
             shell_println!("uptime: {}.{:03}s", up.seconds, up.millis);
         }
+        "date" => print_date(),
+        "time" => print_time(),
         "uptime" => {
             let up = timer::uptime();
             shell_println!(
@@ -245,12 +260,29 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("heap used:  {} bytes", heap.used);
             shell_println!("heap free:  {} bytes", heap.remaining);
         }
+        "memtest" => handle_memtest_command(parts),
+        "hexdump" => handle_hexdump_command(parts),
+        "mouse" => {
+            let state = mouse::state();
+            shell_println!(
+                "mouse x={} y={} left={} middle={} right={}",
+                state.x,
+                state.y,
+                if state.left { 1 } else { 0 },
+                if state.middle { 1 } else { 0 },
+                if state.right { 1 } else { 0 }
+            );
+        }
+        "beep" => handle_beep_command(parts),
         "color" => {
             handle_color_command(parts);
         }
         "reboot" => {
             shell_println!("Rebooting...");
             reboot::reboot();
+        }
+        "panic" => {
+            panic!("panic command invoked from shell");
         }
         _ => {
             shell_println!("unknown command: {}", command);
@@ -303,6 +335,215 @@ fn set_input_line(line: &mut [u8; MAX_LINE], len: &mut usize, replacement: &[u8]
         *len += 1;
         shell_print!("{}", byte as char);
     }
+}
+
+fn print_date() {
+    let up = timer::uptime();
+    let days = (up.seconds / 86_400) as i64;
+    let (year, month, day) = civil_from_days(days);
+    shell_println!("date (epoch + uptime): {:04}-{:02}-{:02}", year, month, day);
+}
+
+fn print_time() {
+    let up = timer::uptime();
+    let seconds_of_day = up.seconds % 86_400;
+    let hours = seconds_of_day / 3_600;
+    let minutes = (seconds_of_day % 3_600) / 60;
+    let seconds = seconds_of_day % 60;
+    shell_println!(
+        "time (since boot): {:02}:{:02}:{:02}.{:03}",
+        hours,
+        minutes,
+        seconds,
+        up.millis
+    );
+}
+
+fn handle_memtest_command<'a, I>(mut parts: I)
+where
+    I: Iterator<Item = &'a str>,
+{
+    let requested = if let Some(token) = parts.next() {
+        let Some(value) = parse_u32(token) else {
+            shell_println!("invalid byte count: {}", token);
+            return;
+        };
+        value as usize
+    } else {
+        4096
+    };
+
+    let result = allocator::memtest(requested);
+    shell_println!("memtest start: {:#010x}", result.start);
+    shell_println!("memtest bytes: {}", result.tested);
+
+    if result.failures == 0 {
+        shell_println!("memtest result: PASS");
+    } else {
+        shell_println!("memtest result: FAIL ({} mismatches)", result.failures);
+        if let Some(address) = result.first_failure_addr {
+            shell_println!("first failure: {:#010x}", address);
+        }
+    }
+}
+
+fn handle_hexdump_command<'a, I>(mut parts: I)
+where
+    I: Iterator<Item = &'a str>,
+{
+    let Some(address_token) = parts.next() else {
+        shell_println!("usage: hexdump <address> [length]");
+        return;
+    };
+
+    let Some(address) = parse_u32(address_token) else {
+        shell_println!("invalid address: {}", address_token);
+        return;
+    };
+
+    let length = if let Some(length_token) = parts.next() {
+        let Some(value) = parse_u32(length_token) else {
+            shell_println!("invalid length: {}", length_token);
+            return;
+        };
+        value as usize
+    } else {
+        128
+    };
+
+    if length == 0 {
+        shell_println!("hexdump length must be > 0");
+        return;
+    }
+
+    let start = address as usize;
+    if !is_safe_dump_range(start, length) {
+        shell_println!("hexdump range not allowed: {:#010x} len={}", start, length);
+        shell_println!("allowed: kernel/heap or VGA memory");
+        return;
+    }
+
+    for offset in (0..length).step_by(16) {
+        let line_addr = start + offset;
+        shell_print!("{:#010x}: ", line_addr);
+
+        for column in 0..16 {
+            let index = offset + column;
+            if index < length {
+                let byte = unsafe { ((start + index) as *const u8).read_volatile() };
+                shell_print!("{:02x} ", byte);
+            } else {
+                shell_print!("   ");
+            }
+        }
+
+        shell_print!("|");
+        for column in 0..16 {
+            let index = offset + column;
+            if index < length {
+                let byte = unsafe { ((start + index) as *const u8).read_volatile() };
+                let ch = if byte.is_ascii_graphic() || byte == b' ' {
+                    byte as char
+                } else {
+                    '.'
+                };
+                shell_print!("{}", ch);
+            }
+        }
+        shell_println!("|");
+    }
+}
+
+fn handle_beep_command<'a, I>(mut parts: I)
+where
+    I: Iterator<Item = &'a str>,
+{
+    let frequency_hz = if let Some(token) = parts.next() {
+        let Some(value) = parse_u32(token) else {
+            shell_println!("invalid frequency: {}", token);
+            return;
+        };
+        value.max(1)
+    } else {
+        880
+    };
+
+    let duration_ms = if let Some(token) = parts.next() {
+        let Some(value) = parse_u32(token) else {
+            shell_println!("invalid duration: {}", token);
+            return;
+        };
+        value.max(1)
+    } else {
+        120
+    };
+
+    shell_println!("beep: {} Hz for {} ms", frequency_hz, duration_ms);
+    beep::play(frequency_hz, duration_ms);
+}
+
+fn parse_u32(token: &str) -> Option<u32> {
+    if token.is_empty() {
+        return None;
+    }
+
+    let (digits, base) = if let Some(hex) = token
+        .strip_prefix("0x")
+        .or_else(|| token.strip_prefix("0X"))
+    {
+        (hex.as_bytes(), 16u32)
+    } else {
+        (token.as_bytes(), 10u32)
+    };
+
+    if digits.is_empty() {
+        return None;
+    }
+
+    let mut value = 0u32;
+    for digit in digits {
+        let numeric = if base == 16 {
+            hex_value(*digit)? as u32
+        } else {
+            match *digit {
+                b'0'..=b'9' => (digit - b'0') as u32,
+                _ => return None,
+            }
+        };
+
+        value = value.checked_mul(base)?;
+        value = value.checked_add(numeric)?;
+    }
+
+    Some(value)
+}
+
+fn is_safe_dump_range(start: usize, length: usize) -> bool {
+    let Some(end) = start.checked_add(length) else {
+        return false;
+    };
+
+    let kernel_start = 0x0010_0000usize;
+    let heap_end = core::ptr::addr_of!(__heap_end) as usize;
+    let vga_start = 0x000B_8000usize;
+    let vga_end = vga_start + 80 * 25 * 2;
+
+    (start >= kernel_start && end <= heap_end) || (start >= vga_start && end <= vga_end)
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+
+    (year as i32, month as u32, day as u32)
 }
 
 fn handle_color_command<'a, I>(mut parts: I)
