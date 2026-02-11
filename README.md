@@ -4,12 +4,12 @@ A bare-metal operating system written from scratch in Rust for x86 (32-bit). Boo
 
 ## Features
 
-- **Custom two-stage bootloader** -- 512-byte MBR stage 1 loads a stage 2 that enables A20, switches to 32-bit protected mode, and jumps to the kernel at 1 MB
-- **Memory management** -- identity-mapped paging (128 MB via 4 MB large pages) and a free-list heap allocator with block coalescing
+- **Custom two-stage bootloader** -- 512-byte MBR stage 1 loads a stage 2 that sets VBE graphics mode, captures an 8x16 BIOS bitmap font, enables A20, enters 32-bit protected mode, and jumps to the kernel at 1 MB
+- **Memory management** -- 4 KiB paging with identity mapping (256 MB) plus framebuffer virtual mapping, and a free-list heap allocator with block coalescing
 - **Interrupt-driven I/O** -- full IDT/GDT/PIC setup with handlers for CPU exceptions and hardware IRQs
 - **PS/2 keyboard driver** -- scancode translation, shift/caps lock, arrow/page keys, and a 256-byte circular input buffer
 - **PS/2 mouse driver** -- 3-byte packet parsing, absolute position tracking, and button state
-- **VGA text mode** -- 80x25 display with color support, hardware cursor, scrolling, and PageUp/PageDown scrollback view
+- **Framebuffer text console** -- 80x25 text terminal rendered from bitmap glyphs into a double buffer, then flushed to linear framebuffer memory (with VGA fallback)
 - **Serial port** -- COM1 UART output for debug logging
 - **ATA PIO disk driver** -- 28-bit LBA read/write on the primary master drive
 - **Custom filesystem (CFS1)** -- superblock + directory table + file storage with create, read, write, delete, list, and format operations
@@ -87,8 +87,9 @@ codexOS/
 ├── src/
 │   ├── main.rs            Kernel entry and initialization sequence
 │   ├── boot.rs            Assembly entry point, BSS zeroing
-│   ├── allocator.rs       Free-list heap allocator (512 KB)
+│   ├── allocator.rs       Free-list heap allocator (8 MB)
 │   ├── ata.rs             ATA PIO disk driver
+│   ├── bootinfo.rs        Stage2 -> kernel boot video metadata
 │   ├── fs.rs              Custom filesystem (CFS1)
 │   ├── gdt.rs             Global Descriptor Table
 │   ├── idt.rs             Interrupt Descriptor Table
@@ -97,7 +98,7 @@ codexOS/
 │   ├── keyboard.rs        PS/2 keyboard driver
 │   ├── matrix.rs          Matrix rain screensaver
 │   ├── mouse.rs           PS/2 mouse driver
-│   ├── paging.rs          Page directory setup (4 MB pages)
+│   ├── paging.rs          4 KiB page tables + framebuffer mapping
 │   ├── pic.rs             8259 PIC initialization
 │   ├── reboot.rs          System reboot
 │   ├── rtc.rs             CMOS real-time clock
@@ -105,10 +106,10 @@ codexOS/
 │   ├── shell.rs           Interactive command shell
 │   ├── shutdown.rs        ACPI/APM power off
 │   ├── timer.rs           PIT timer (IRQ0)
-│   ├── vga.rs             VGA text-mode driver
+│   ├── vga.rs             Bitmap-font framebuffer text console
 │   └── bin/
 │       ├── boot_stage1.rs MBR bootloader (512 bytes)
-│       └── boot_stage2.rs Stage 2: A20, protected mode, kernel load
+│       └── boot_stage2.rs Stage 2: VBE mode set, A20, protected mode, kernel load
 ├── linker.ld              Kernel linker script (loads at 1 MB)
 ├── stage1.ld              Stage 1 bootloader linker script
 ├── stage2.ld              Stage 2 bootloader linker script
@@ -125,9 +126,9 @@ codexOS/
 0x00008000  Stage 2 bootloader
 0x00100000  Kernel .text (1 MB)
     ...     .rodata, .data, .bss
-    ...     Heap (512 KB)
+    ...     Heap (8 MB)
     ...     Stack (1 MB, grows down)
-0x08000000  End of identity-mapped region (128 MB)
+0x10000000  End of identity-mapped region (256 MB)
 ```
 
 ## Disk Layout

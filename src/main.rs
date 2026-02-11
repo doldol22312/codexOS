@@ -4,6 +4,7 @@
 
 mod allocator;
 mod ata;
+mod bootinfo;
 mod boot;
 mod fs;
 mod gdt;
@@ -31,20 +32,38 @@ pub extern "C" fn kernel_main() -> ! {
     serial::init();
     serial_println!("serial: initialized");
 
-    vga::set_color(0x0F, 0x00);
-    vga::clear_screen();
-    println!("codexOS booting...");
-    serial_println!("boot: vga ready");
-
     gdt::init();
     serial_println!("boot: gdt ready");
     idt::init();
     serial_println!("boot: idt ready");
     paging::init();
     serial_println!(
-        "boot: paging ready ({} MiB identity mapped)",
-        paging::stats().mapped_bytes / (1024 * 1024)
+        "boot: paging ready ({} MiB mapped, {} KiB pages)",
+        paging::stats().mapped_bytes / (1024 * 1024),
+        paging::stats().page_size_bytes / 1024
     );
+    if let Some(mapping) = paging::framebuffer_mapping() {
+        serial_println!(
+            "boot: framebuffer {}x{} {}bpp mapped at {:#010x}",
+            mapping.width,
+            mapping.height,
+            mapping.bpp,
+            mapping.virtual_base
+        );
+        serial_println!(
+            "boot: fb phys={:#010x} bytes={}",
+            mapping.physical_base,
+            mapping.bytes,
+        );
+    } else {
+        serial_println!("boot: fb mapping unavailable");
+    }
+
+    vga::init();
+    vga::set_color(0x0F, 0x00);
+    vga::clear_screen();
+    println!("codexOS booting...");
+    serial_println!("boot: video ready");
     pic::init();
     serial_println!("boot: pic ready");
     timer::init(100);

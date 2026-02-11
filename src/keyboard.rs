@@ -1,4 +1,5 @@
 use crate::io::inb;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 const BUFFER_SIZE: usize = 256;
 const EVENT_UP: u8 = 0x80;
@@ -14,6 +15,7 @@ static mut TAIL: usize = 0;
 static mut SHIFT: bool = false;
 static mut CAPS_LOCK: bool = false;
 static mut EXTENDED: bool = false;
+static KEY_ACTIVITY: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyEvent {
@@ -48,6 +50,7 @@ fn process_scancode(scancode: u8) {
             if released {
                 return;
             }
+            mark_key_activity();
 
             match key {
                 0x48 => {
@@ -73,6 +76,10 @@ fn process_scancode(scancode: u8) {
             return;
         }
 
+        if !released {
+            mark_key_activity();
+        }
+
         match key {
             0x2A | 0x36 => {
                 SHIFT = !released;
@@ -93,6 +100,11 @@ fn process_scancode(scancode: u8) {
             push_byte(byte);
         }
     }
+}
+
+#[inline]
+fn mark_key_activity() {
+    KEY_ACTIVITY.fetch_add(1, Ordering::Relaxed);
 }
 
 fn translate_scancode(scancode: u8, shift: bool, caps_lock: bool) -> Option<u8> {
@@ -211,4 +223,8 @@ pub fn read_key() -> Option<KeyEvent> {
         _ if byte < 0x80 => Some(KeyEvent::Char(byte as char)),
         _ => None,
     }
+}
+
+pub fn key_activity() -> u32 {
+    KEY_ACTIVITY.load(Ordering::Relaxed)
 }

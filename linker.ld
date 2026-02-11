@@ -35,7 +35,7 @@ SECTIONS
 
     . = ALIGN(16);
     __heap_start = .;
-    . = . + 512K;
+    . = . + 8M;
     __heap_end = .;
 
     .boot_stack ALIGN(16) (NOLOAD) :

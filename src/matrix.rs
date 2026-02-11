@@ -1,8 +1,9 @@
+extern crate alloc;
+
+use alloc::vec;
+
 use crate::{keyboard, serial, timer, vga};
 
-const VGA_BUFFER: *mut u16 = 0xB8000 as *mut u16;
-const WIDTH: usize = 80;
-const HEIGHT: usize = 25;
 const TRAIL_LEN: i32 = 8;
 const HEAD_COLOR: u8 = 0x0A;
 const TRAIL_COLOR: u8 = 0x02;
@@ -12,19 +13,23 @@ pub fn run() {
     vga::set_color(HEAD_COLOR, 0x00);
     vga::clear_screen();
 
-    let mut rng = Rng::new(timer::ticks().wrapping_add(0x2F3B_9A1D));
-    let mut heads = [-1i32; WIDTH];
-    let mut speeds = [1u8; WIDTH];
-    let mut cooldown = [0u8; WIDTH];
+    let width = vga::text_columns().max(1);
+    let height = vga::text_rows().max(1);
 
-    for col in 0..WIDTH {
+    let mut rng = Rng::new(timer::ticks().wrapping_add(0x2F3B_9A1D));
+    let mut heads = vec![-1i32; width];
+    let mut speeds = vec![1u8; width];
+    let mut cooldown = vec![0u8; width];
+
+    for col in 0..width {
         speeds[col] = (rng.next() % 3 + 1) as u8;
         cooldown[col] = (rng.next() % 8) as u8;
     }
 
     let mut last_tick = timer::ticks();
+    let mut key_activity_marker = keyboard::key_activity();
     loop {
-        if exit_requested() {
+        if exit_requested(&mut key_activity_marker) {
             break;
         }
 
@@ -38,8 +43,8 @@ pub fn run() {
         last_tick = now;
 
         for _ in 0..elapsed {
-            update_frame(&mut heads, &mut speeds, &mut cooldown, &mut rng);
-            if exit_requested() {
+            update_frame(&mut heads, &mut speeds, &mut cooldown, width, height, &mut rng);
+            if exit_requested(&mut key_activity_marker) {
                 break;
             }
         }
@@ -50,12 +55,14 @@ pub fn run() {
 }
 
 fn update_frame(
-    heads: &mut [i32; WIDTH],
-    speeds: &mut [u8; WIDTH],
-    cooldown: &mut [u8; WIDTH],
+    heads: &mut [i32],
+    speeds: &mut [u8],
+    cooldown: &mut [u8],
+    width: usize,
+    height: usize,
     rng: &mut Rng,
 ) {
-    for col in 0..WIDTH {
+    for col in 0..width {
         if cooldown[col] > 0 {
             cooldown[col] -= 1;
             continue;
@@ -72,22 +79,22 @@ fn update_frame(
 
         let head_row = heads[col];
 
-        if head_row >= 0 && head_row < HEIGHT as i32 {
+        if head_row >= 0 && head_row < height as i32 {
             write_cell(head_row as usize, col, random_char(rng), HEAD_COLOR);
         }
 
         let trail_row = head_row - 1;
-        if trail_row >= 0 && trail_row < HEIGHT as i32 {
+        if trail_row >= 0 && trail_row < height as i32 {
             write_cell(trail_row as usize, col, random_char(rng), TRAIL_COLOR);
         }
 
         let clear_row = head_row - TRAIL_LEN;
-        if clear_row >= 0 && clear_row < HEIGHT as i32 {
+        if clear_row >= 0 && clear_row < height as i32 {
             write_cell(clear_row as usize, col, b' ', 0x00);
         }
 
         heads[col] = head_row + 1;
-        if heads[col] > HEIGHT as i32 + TRAIL_LEN {
+        if heads[col] > height as i32 + TRAIL_LEN {
             heads[col] = -1;
             speeds[col] = (rng.next() % 3 + 1) as u8;
             cooldown[col] = (rng.next() % 16) as u8;
@@ -95,11 +102,23 @@ fn update_frame(
             speeds[col] = (rng.next() % 3 + 1) as u8;
         }
     }
+
+    vga::present();
 }
 
 #[inline]
-fn exit_requested() -> bool {
-    keyboard::read_key().is_some() || serial::read_byte().is_some()
+fn exit_requested(activity_marker: &mut u32) -> bool {
+    if keyboard::read_key().is_some() || serial::read_byte().is_some() {
+        return true;
+    }
+
+    let current_activity = keyboard::key_activity();
+    if current_activity != *activity_marker {
+        *activity_marker = current_activity;
+        return true;
+    }
+
+    false
 }
 
 #[inline]
@@ -109,10 +128,8 @@ fn random_char(rng: &mut Rng) -> u8 {
 
 #[inline]
 fn write_cell(row: usize, col: usize, ch: u8, color: u8) {
-    let value = ((color as u16) << 8) | ch as u16;
-    unsafe {
-        core::ptr::write_volatile(VGA_BUFFER.add(row * WIDTH + col), value);
-    }
+    let color_code = color & 0x0F;
+    vga::write_char_at(row, col, ch, color_code);
 }
 
 #[inline]

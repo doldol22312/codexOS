@@ -1,14 +1,10 @@
 use crate::io::{inb, outb};
 use crate::vga;
 
-const SCREEN_WIDTH: i32 = 80;
-const SCREEN_HEIGHT: i32 = 25;
-const VGA_BUFFER: *mut u16 = 0xB8000 as *mut u16;
-
 static mut PACKET: [u8; 3] = [0; 3];
 static mut PACKET_INDEX: usize = 0;
-static mut MOUSE_X: i32 = SCREEN_WIDTH / 2;
-static mut MOUSE_Y: i32 = SCREEN_HEIGHT / 2;
+static mut MOUSE_X: i32 = 0;
+static mut MOUSE_Y: i32 = 0;
 static mut BUTTONS: u8 = 0;
 
 #[derive(Clone, Copy)]
@@ -39,6 +35,14 @@ pub fn init() {
     let _ = send_mouse_command(0xF6);
     let _ = send_mouse_command(0xF4);
 
+    let (screen_width, screen_height) = screen_bounds();
+    unsafe {
+        MOUSE_X = screen_width / 2;
+        MOUSE_Y = screen_height / 2;
+        BUTTONS = 0;
+        PACKET_INDEX = 0;
+    }
+
     render_status_line();
 }
 
@@ -66,9 +70,10 @@ pub fn handle_interrupt() {
 
         let dx = PACKET[1] as i8 as i32;
         let dy = PACKET[2] as i8 as i32;
+        let (screen_width, screen_height) = screen_bounds();
 
-        let new_x = clamp_i32(MOUSE_X + dx, 0, SCREEN_WIDTH - 1);
-        let new_y = clamp_i32(MOUSE_Y - dy, 0, SCREEN_HEIGHT - 1);
+        let new_x = clamp_i32(MOUSE_X + dx, 0, screen_width - 1);
+        let new_y = clamp_i32(MOUSE_Y - dy, 0, screen_height - 1);
 
         MOUSE_X = new_x;
         MOUSE_Y = new_y;
@@ -172,12 +177,7 @@ fn render_status_line() {
     cursor = append_text(&mut line, cursor, " r=");
     let _ = append_bool(&mut line, cursor, mouse.right);
 
-    unsafe {
-        for column in 0..80 {
-            let value = ((color as u16) << 8) | line[column] as u16;
-            core::ptr::write_volatile(VGA_BUFFER.add(vga::status_row() * 80 + column), value);
-        }
-    }
+    vga::write_status_line(&line, color);
 }
 
 fn append_text(buffer: &mut [u8; 80], mut cursor: usize, text: &str) -> usize {
@@ -235,4 +235,13 @@ fn clamp_i32(value: i32, min: i32, max: i32) -> i32 {
     } else {
         value
     }
+}
+
+fn screen_bounds() -> (i32, i32) {
+    let width = vga::text_columns().max(1).min(i32::MAX as usize) as i32;
+    let height = vga::status_row()
+        .saturating_add(1)
+        .max(1)
+        .min(i32::MAX as usize) as i32;
+    (width, height)
 }

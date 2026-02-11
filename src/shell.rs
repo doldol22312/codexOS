@@ -25,7 +25,7 @@ const EDITOR_MAX_LINES: usize = 128;
 const EDITOR_MAX_LINE_LEN: usize = 200;
 const EDITOR_MAX_BYTES: usize = 4096;
 
-const COMMANDS: [&str; 26] = [
+const COMMANDS: [&str; 27] = [
     "help",
     "clear",
     "echo",
@@ -48,6 +48,7 @@ const COMMANDS: [&str; 26] = [
     "hexdump",
     "mouse",
     "matrix",
+    "gfxdemo",
     "color",
     "reboot",
     "shutdown",
@@ -476,6 +477,7 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("  hexdump <addr> [len] - dump memory");
             shell_println!("  mouse - show mouse position/buttons");
             shell_println!("  matrix - matrix rain (press any key to exit)");
+            shell_println!("  gfxdemo - draw framebuffer primitives demo");
             shell_println!("  color - set text colors");
             shell_println!("  reboot - reboot machine");
             shell_println!("  shutdown - power off machine");
@@ -514,11 +516,16 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("lang: Rust + inline assembly");
             shell_println!("boot: custom BIOS bootloader");
             shell_println!(
-                "features: VGA, IDT, IRQ keyboard, IRQ mouse, PIT, paging={}, ATA={}, FS={}, RTC={}, shell, free-list heap",
+                "features: VBE+framebuffer text, IDT, IRQ keyboard, IRQ mouse, PIT, paging={}, ATA={}, FS={}, RTC={}, shell, free-list heap",
                 paging_state,
                 ata_state,
                 fs_state,
                 rtc_state
+            );
+            shell_println!(
+                "text grid: {}x{} (+1 status row)",
+                vga::text_columns(),
+                vga::text_rows()
             );
             shell_println!("uptime: {}.{:03}s", up.seconds, up.millis);
         }
@@ -565,6 +572,9 @@ fn execute_line(bytes: &[u8]) {
         "matrix" => {
             shell_println!("matrix mode: press any key to return");
             matrix::run();
+        }
+        "gfxdemo" => {
+            handle_gfxdemo_command();
         }
         "color" => {
             handle_color_command(parts);
@@ -999,11 +1009,101 @@ fn handle_paging_command() {
     );
     shell_println!("page directory: {:#010x}", paging.directory_phys);
     shell_println!(
-        "identity map: {} MiB ({} entries x {} MiB pages)",
+        "mapped: {} MiB ({} pages x {} KiB)",
         paging.mapped_bytes / (1024 * 1024),
         paging.mapped_regions,
-        paging.page_size_bytes / (1024 * 1024)
+        paging.page_size_bytes / 1024
     );
+    shell_println!(
+        "framebuffer: {}",
+        if paging.framebuffer_mapped {
+            "mapped"
+        } else {
+            "unmapped"
+        }
+    );
+    if paging.framebuffer_mapped {
+        shell_println!("framebuffer virtual base: {:#010x}", paging.framebuffer_virtual);
+        shell_println!("framebuffer bytes: {}", paging.framebuffer_bytes);
+    }
+}
+
+fn handle_gfxdemo_command() {
+    let Some((fb_width, fb_height)) = vga::framebuffer_resolution() else {
+        shell_println!("gfxdemo requires VBE/framebuffer mode");
+        return;
+    };
+
+    let width = fb_width.min(i32::MAX as usize) as i32;
+    let height = fb_height.min(i32::MAX as usize) as i32;
+    if width <= 0 || height <= 0 {
+        shell_println!("gfxdemo: invalid framebuffer size");
+        return;
+    }
+
+    shell_println!("gfxdemo: press any key to return");
+    let key_activity_marker = keyboard::key_activity();
+
+    let _ = vga::draw_filled_rect(0, 0, width, height, 0x111520);
+    let _ = vga::draw_filled_rect(24, 24, width - 48, height - 48, 0x1B2232);
+    let _ = vga::draw_filled_rect(40, 40, width - 80, 56, 0x27344D);
+
+    let _ = vga::draw_horizontal_line(40, 116, width - 80, 0x6FA8FF);
+    let _ = vga::draw_vertical_line(40, 116, height - 156, 0x6FA8FF);
+    let _ = vga::draw_horizontal_line(40, height - 40, width - 80, 0x6FA8FF);
+    let _ = vga::draw_vertical_line(width - 40, 116, height - 156, 0x6FA8FF);
+
+    let _ = vga::draw_line(56, 132, width - 56, height - 56, 0xFF8A65);
+    let _ = vga::draw_line(width - 56, 132, 56, height - 56, 0x7CFFCB);
+    let _ = vga::draw_line(56, height / 2, width - 56, height / 2, 0xFFE082);
+
+    let circle_r = (width.min(height) / 7).max(18);
+    let _ = vga::draw_circle(width / 3, height / 2 + 24, circle_r, 0xFFD166);
+    let _ = vga::draw_ellipse(
+        (width * 2) / 3,
+        height / 2 + 24,
+        circle_r + 26,
+        (circle_r * 2) / 3,
+        0x66D9EF,
+    );
+
+    const ICON_W: usize = 28;
+    const ICON_H: usize = 28;
+    let mut icon = [0u32; ICON_W * ICON_H];
+    for y in 0..ICON_H {
+        for x in 0..ICON_W {
+            let idx = y * ICON_W + x;
+            let border = x == 0 || y == 0 || x + 1 == ICON_W || y + 1 == ICON_H;
+            let checker = ((x / 4) + (y / 4)) & 1 == 0;
+            icon[idx] = if border {
+                0xFFFFFF
+            } else if checker {
+                0xF07178
+            } else {
+                0x82AAFF
+            };
+        }
+    }
+
+    let bottom = (height - ICON_H as i32 - 52).max(0);
+    let _ = vga::blit_bitmap(56, bottom, &icon, ICON_W, ICON_H, ICON_W);
+    let _ = vga::blit_bitmap(width - ICON_W as i32 - 56, bottom, &icon, ICON_W, ICON_H, ICON_W);
+
+    loop {
+        if keyboard::read_key().is_some() || serial::read_byte().is_some() {
+            break;
+        }
+
+        let current_activity = keyboard::key_activity();
+        if current_activity != key_activity_marker {
+            break;
+        }
+        unsafe {
+            core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
+        }
+    }
+
+    vga::clear_screen();
 }
 
 fn handle_disk_command() {
