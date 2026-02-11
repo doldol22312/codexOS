@@ -20,6 +20,35 @@ use crate::{
 
 const MAX_LINE: usize = 256;
 const HISTORY_SIZE: usize = 32;
+const MAX_FS_COMPLETION_FILES: usize = 64;
+
+const COMMANDS: [&str; 25] = [
+    "help",
+    "clear",
+    "echo",
+    "info",
+    "disk",
+    "fsinfo",
+    "fsformat",
+    "fsls",
+    "fswrite",
+    "fsdelete",
+    "fscat",
+    "date",
+    "time",
+    "rtc",
+    "paging",
+    "uptime",
+    "heap",
+    "memtest",
+    "hexdump",
+    "mouse",
+    "matrix",
+    "color",
+    "reboot",
+    "shutdown",
+    "panic",
+];
 
 unsafe extern "C" {
     static __heap_end: u8;
@@ -98,6 +127,7 @@ impl History {
 pub fn run() -> ! {
     let mut line = [0u8; MAX_LINE];
     let mut len = 0usize;
+    let mut cursor = 0usize;
     let mut history = History::new();
     let mut history_cursor: Option<usize> = None;
 
@@ -112,33 +142,34 @@ pub fn run() -> ! {
                     history_cursor = None;
                     execute_line(&line[..len]);
                     len = 0;
+                    cursor = 0;
                     print_prompt();
                 }
                 KeyEvent::Char('\x08') => {
-                    if len > 0 {
-                        len -= 1;
-                        erase_input_char();
-                    }
+                    handle_backspace(&mut line, &mut len, &mut cursor);
+                }
+                KeyEvent::Char('\t') => {
+                    handle_tab_completion(&mut line, &mut len, &mut cursor);
                 }
                 KeyEvent::Char(ch) => {
-                    if is_printable(ch) && len < MAX_LINE {
-                        line[len] = ch as u8;
-                        len += 1;
-                        shell_print!("{}", ch);
+                    if is_printable(ch) {
+                        insert_input_char(&mut line, &mut len, &mut cursor, ch);
                     }
                 }
                 KeyEvent::Up => {
                     if let Some(replacement) = navigate_history_up(&history, &mut history_cursor) {
-                        set_input_line(&mut line, &mut len, replacement);
+                        set_input_line(&mut line, &mut len, &mut cursor, replacement);
                     }
                 }
                 KeyEvent::Down => {
                     if let Some(replacement) =
                         navigate_history_down(&history, &mut history_cursor)
                     {
-                        set_input_line(&mut line, &mut len, replacement);
+                        set_input_line(&mut line, &mut len, &mut cursor, replacement);
                     }
                 }
+                KeyEvent::Left => move_cursor_left_in_input(&mut cursor),
+                KeyEvent::Right => move_cursor_right_in_input(len, &mut cursor),
             }
         } else {
             unsafe {
@@ -170,6 +201,7 @@ fn read_input() -> Option<KeyEvent> {
                     return None;
                 }
                 b'\r' | b'\n' => KeyEvent::Char('\n'),
+                b'\t' => KeyEvent::Char('\t'),
                 0x08 | 0x7F => KeyEvent::Char('\x08'),
                 0x20..=0x7E => KeyEvent::Char(byte as char),
                 _ => return None,
@@ -187,6 +219,8 @@ fn read_input() -> Option<KeyEvent> {
                 match byte {
                     b'A' => KeyEvent::Up,
                     b'B' => KeyEvent::Down,
+                    b'C' => KeyEvent::Right,
+                    b'D' => KeyEvent::Left,
                     _ => return None,
                 }
             }
@@ -235,7 +269,7 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("  reboot - reboot machine");
             shell_println!("  shutdown - power off machine");
             shell_println!("  panic - trigger kernel panic");
-            shell_println!("History: use Up/Down arrows");
+            shell_println!("Editing: Up/Down history, Left/Right move cursor, Tab complete");
         }
         "clear" => vga::clear_screen(),
         "echo" => {
@@ -371,24 +405,310 @@ fn navigate_history_down<'a>(
     Some(history.get(next_index))
 }
 
-fn set_input_line(line: &mut [u8; MAX_LINE], len: &mut usize, replacement: &[u8]) {
-    while *len > 0 {
-        *len -= 1;
-        erase_input_char();
-    }
+fn set_input_line(
+    line: &mut [u8; MAX_LINE],
+    len: &mut usize,
+    cursor: &mut usize,
+    replacement: &[u8],
+) {
+    clear_input_line(*len, *cursor);
 
     let copy_len = replacement.len().min(MAX_LINE);
-    for index in 0..copy_len {
-        let byte = replacement[index];
-        line[index] = byte;
-        *len += 1;
-        shell_print!("{}", byte as char);
+    line[..copy_len].copy_from_slice(&replacement[..copy_len]);
+    *len = copy_len;
+    *cursor = copy_len;
+
+    for byte in line.iter().take(copy_len) {
+        shell_print!("{}", *byte as char);
     }
 }
 
-fn erase_input_char() {
-    vga::backspace();
-    serial::write_str("\x08 \x08");
+fn insert_input_char(line: &mut [u8; MAX_LINE], len: &mut usize, cursor: &mut usize, ch: char) {
+    if *len >= MAX_LINE {
+        return;
+    }
+
+    let byte = ch as u8;
+
+    if *cursor == *len {
+        line[*cursor] = byte;
+        *len += 1;
+        *cursor += 1;
+        shell_print!("{}", ch);
+        return;
+    }
+
+    for index in (*cursor..*len).rev() {
+        line[index + 1] = line[index];
+    }
+
+    let redraw_start = *cursor;
+    line[redraw_start] = byte;
+    *len += 1;
+    *cursor += 1;
+
+    for index in redraw_start..*len {
+        shell_print!("{}", line[index] as char);
+    }
+
+    move_cursor_left_visual(*len - *cursor);
+}
+
+fn handle_backspace(line: &mut [u8; MAX_LINE], len: &mut usize, cursor: &mut usize) {
+    if *cursor == 0 || *len == 0 {
+        return;
+    }
+
+    let delete_index = *cursor - 1;
+    for index in delete_index..(*len - 1) {
+        line[index] = line[index + 1];
+    }
+
+    *len -= 1;
+    *cursor -= 1;
+
+    move_cursor_left_visual(1);
+
+    for index in *cursor..*len {
+        shell_print!("{}", line[index] as char);
+    }
+    shell_print!(" ");
+
+    move_cursor_left_visual((*len - *cursor) + 1);
+}
+
+fn move_cursor_left_in_input(cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+
+    *cursor -= 1;
+    move_cursor_left_visual(1);
+}
+
+fn move_cursor_right_in_input(len: usize, cursor: &mut usize) {
+    if *cursor >= len {
+        return;
+    }
+
+    *cursor += 1;
+    move_cursor_right_visual(1);
+}
+
+fn clear_input_line(len: usize, cursor: usize) {
+    if cursor > 0 {
+        move_cursor_left_visual(cursor);
+    }
+
+    for _ in 0..len {
+        shell_print!(" ");
+    }
+
+    if len > 0 {
+        move_cursor_left_visual(len);
+    }
+}
+
+fn move_cursor_left_visual(steps: usize) {
+    for _ in 0..steps {
+        vga::move_cursor_left(1);
+        serial::write_str("\x1b[D");
+    }
+}
+
+fn move_cursor_right_visual(steps: usize) {
+    for _ in 0..steps {
+        vga::move_cursor_right(1);
+        serial::write_str("\x1b[C");
+    }
+}
+
+fn handle_tab_completion(line: &mut [u8; MAX_LINE], len: &mut usize, cursor: &mut usize) {
+    if *cursor > *len {
+        return;
+    }
+
+    let token_start = find_token_start(line, *cursor);
+    let token_end = find_token_end(line, *len, token_start);
+    let prefix = &line[token_start..*cursor];
+    let token_index = word_index_at(line, token_start);
+    let complete_command = token_index == 0;
+
+    let old_len = *len;
+    let old_cursor = *cursor;
+
+    let mut matches = 0usize;
+    let mut first = [0u8; MAX_LINE];
+    let mut first_len = 0usize;
+    let mut common = [0u8; MAX_LINE];
+    let mut common_len = 0usize;
+
+    if complete_command {
+        for command in COMMANDS {
+            update_completion_match(
+                command.as_bytes(),
+                prefix,
+                &mut matches,
+                &mut first,
+                &mut first_len,
+                &mut common,
+                &mut common_len,
+            );
+        }
+    } else {
+        let mut files = [fs::FileInfo::empty(); MAX_FS_COMPLETION_FILES];
+        if let Ok(count) = fs::list(&mut files) {
+            for file in files.iter().take(count) {
+                update_completion_match(
+                    file.name_str().as_bytes(),
+                    prefix,
+                    &mut matches,
+                    &mut first,
+                    &mut first_len,
+                    &mut common,
+                    &mut common_len,
+                );
+            }
+        }
+    }
+
+    if matches == 0 {
+        return;
+    }
+
+    let (completion, completion_len) = if matches == 1 {
+        (&first, first_len)
+    } else {
+        (&common, common_len)
+    };
+
+    let remove_len = token_end - token_start;
+    let tail_len = old_len - token_end;
+    let Some(new_len) = token_start
+        .checked_add(completion_len)
+        .and_then(|value| value.checked_add(tail_len))
+    else {
+        return;
+    };
+
+    if new_len > MAX_LINE {
+        return;
+    }
+
+    if completion_len != remove_len {
+        line.copy_within(token_end..old_len, token_start + completion_len);
+    }
+    line[token_start..token_start + completion_len]
+        .copy_from_slice(&completion[..completion_len]);
+
+    *len = new_len;
+    *cursor = token_start + completion_len;
+
+    let can_append_space = matches == 1
+        && old_cursor == token_end
+        && token_end == old_len
+        && new_len < MAX_LINE
+        && (*len == 0 || line[*len - 1] != b' ');
+
+    if can_append_space {
+        line[*len] = b' ';
+        *len += 1;
+        *cursor += 1;
+    }
+    redraw_input_line(line, old_len, old_cursor, *len, *cursor);
+}
+
+fn update_completion_match(
+    candidate: &[u8],
+    prefix: &[u8],
+    matches: &mut usize,
+    first: &mut [u8; MAX_LINE],
+    first_len: &mut usize,
+    common: &mut [u8; MAX_LINE],
+    common_len: &mut usize,
+) {
+    if candidate.len() > MAX_LINE || !candidate.starts_with(prefix) {
+        return;
+    }
+
+    if *matches == 0 {
+        *first_len = candidate.len();
+        first[..*first_len].copy_from_slice(candidate);
+        *common_len = *first_len;
+        common[..*common_len].copy_from_slice(candidate);
+    } else {
+        *common_len = common_prefix_len(&common[..*common_len], candidate);
+    }
+
+    *matches += 1;
+}
+
+fn common_prefix_len(left: &[u8], right: &[u8]) -> usize {
+    let limit = left.len().min(right.len());
+    for index in 0..limit {
+        if left[index] != right[index] {
+            return index;
+        }
+    }
+    limit
+}
+
+fn find_token_start(line: &[u8; MAX_LINE], cursor: usize) -> usize {
+    let mut index = cursor;
+    while index > 0 && !is_whitespace_byte(line[index - 1]) {
+        index -= 1;
+    }
+    index
+}
+
+fn find_token_end(line: &[u8; MAX_LINE], len: usize, start: usize) -> usize {
+    let mut index = start;
+    while index < len && !is_whitespace_byte(line[index]) {
+        index += 1;
+    }
+    index
+}
+
+fn word_index_at(line: &[u8; MAX_LINE], token_start: usize) -> usize {
+    let mut index = 0usize;
+    let mut cursor = 0usize;
+
+    while cursor < token_start {
+        while cursor < token_start && is_whitespace_byte(line[cursor]) {
+            cursor += 1;
+        }
+
+        if cursor >= token_start {
+            break;
+        }
+
+        while cursor < token_start && !is_whitespace_byte(line[cursor]) {
+            cursor += 1;
+        }
+        index += 1;
+    }
+
+    index
+}
+
+fn is_whitespace_byte(byte: u8) -> bool {
+    byte == b' ' || byte == b'\t'
+}
+
+fn redraw_input_line(
+    line: &[u8; MAX_LINE],
+    old_len: usize,
+    old_cursor: usize,
+    new_len: usize,
+    new_cursor: usize,
+) {
+    clear_input_line(old_len, old_cursor);
+
+    for byte in line.iter().take(new_len) {
+        shell_print!("{}", *byte as char);
+    }
+
+    move_cursor_left_visual(new_len.saturating_sub(new_cursor));
 }
 
 fn print_date() {

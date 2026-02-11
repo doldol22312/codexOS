@@ -3,6 +3,8 @@ use crate::io::inb;
 const BUFFER_SIZE: usize = 256;
 const EVENT_UP: u8 = 0x80;
 const EVENT_DOWN: u8 = 0x81;
+const EVENT_LEFT: u8 = 0x82;
+const EVENT_RIGHT: u8 = 0x83;
 
 static mut BUFFER: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
 static mut HEAD: usize = 0;
@@ -16,6 +18,8 @@ pub enum KeyEvent {
     Char(char),
     Up,
     Down,
+    Left,
+    Right,
 }
 
 pub fn init() {}
@@ -47,6 +51,12 @@ fn process_scancode(scancode: u8) {
                 }
                 0x50 => {
                     push_byte(EVENT_DOWN);
+                }
+                0x4B => {
+                    push_byte(EVENT_LEFT);
+                }
+                0x4D => {
+                    push_byte(EVENT_RIGHT);
                 }
                 _ => {}
             }
@@ -184,6 +194,8 @@ pub fn read_key() -> Option<KeyEvent> {
     match byte {
         EVENT_UP => Some(KeyEvent::Up),
         EVENT_DOWN => Some(KeyEvent::Down),
+        EVENT_LEFT => Some(KeyEvent::Left),
+        EVENT_RIGHT => Some(KeyEvent::Right),
         _ if byte < 0x80 => Some(KeyEvent::Char(byte as char)),
         _ => None,
     }

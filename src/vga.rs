@@ -61,6 +61,31 @@ pub const fn status_row() -> usize {
     BUFFER_HEIGHT - 1
 }
 
+#[inline]
+const fn max_terminal_cursor_index() -> usize {
+    TERMINAL_HEIGHT * BUFFER_WIDTH - 1
+}
+
+pub fn move_cursor_left(count: usize) {
+    unsafe {
+        let index = CURSOR_ROW * BUFFER_WIDTH + CURSOR_COL;
+        let next = index.saturating_sub(count);
+        CURSOR_ROW = next / BUFFER_WIDTH;
+        CURSOR_COL = next % BUFFER_WIDTH;
+    }
+    sync_hardware_cursor();
+}
+
+pub fn move_cursor_right(count: usize) {
+    unsafe {
+        let index = CURSOR_ROW * BUFFER_WIDTH + CURSOR_COL;
+        let next = index.saturating_add(count).min(max_terminal_cursor_index());
+        CURSOR_ROW = next / BUFFER_WIDTH;
+        CURSOR_COL = next % BUFFER_WIDTH;
+    }
+    sync_hardware_cursor();
+}
+
 pub fn foreground_color() -> u8 {
     color_code() & 0x0F
 }
