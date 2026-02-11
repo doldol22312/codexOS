@@ -4,6 +4,7 @@ use crate::io::outb;
 
 const BUFFER_WIDTH: usize = 80;
 const BUFFER_HEIGHT: usize = 25;
+const TERMINAL_HEIGHT: usize = BUFFER_HEIGHT - 1;
 const VGA_BUFFER: *mut u16 = 0xB8000 as *mut u16;
 const DEFAULT_COLOR: u8 = 0x0F;
 const VGA_CRTC_INDEX: u16 = 0x3D4;
@@ -56,6 +57,10 @@ pub fn color_code() -> u8 {
     current_color()
 }
 
+pub const fn status_row() -> usize {
+    BUFFER_HEIGHT - 1
+}
+
 pub fn foreground_color() -> u8 {
     color_code() & 0x0F
 }
@@ -92,7 +97,7 @@ pub fn clear_screen() {
 
 pub fn scroll() {
     unsafe {
-        for row in 1..BUFFER_HEIGHT {
+        for row in 1..TERMINAL_HEIGHT {
             for col in 0..BUFFER_WIDTH {
                 let value = read_cell(row, col);
                 write_cell(row - 1, col, value);
@@ -100,7 +105,7 @@ pub fn scroll() {
         }
 
         for col in 0..BUFFER_WIDTH {
-            write_cell(BUFFER_HEIGHT - 1, col, vga_entry(b' ', current_color()));
+            write_cell(TERMINAL_HEIGHT - 1, col, vga_entry(b' ', current_color()));
         }
 
         if CURSOR_ROW > 0 {
@@ -150,7 +155,7 @@ pub fn put_char(ch: char) {
             }
         }
 
-        if CURSOR_ROW >= BUFFER_HEIGHT {
+        if CURSOR_ROW >= TERMINAL_HEIGHT {
             scroll();
             return;
         }

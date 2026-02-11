@@ -3,7 +3,6 @@ use crate::vga;
 
 const SCREEN_WIDTH: i32 = 80;
 const SCREEN_HEIGHT: i32 = 25;
-const STATUS_ROW: usize = 24;
 const VGA_BUFFER: *mut u16 = 0xB8000 as *mut u16;
 
 static mut PACKET: [u8; 3] = [0; 3];
@@ -176,7 +175,7 @@ fn render_status_line() {
     unsafe {
         for column in 0..80 {
             let value = ((color as u16) << 8) | line[column] as u16;
-            core::ptr::write_volatile(VGA_BUFFER.add(STATUS_ROW * 80 + column), value);
+            core::ptr::write_volatile(VGA_BUFFER.add(vga::status_row() * 80 + column), value);
         }
     }
 }
