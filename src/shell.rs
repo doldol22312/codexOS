@@ -3,7 +3,8 @@ use core::str;
 use crate::{
     allocator, ata, fs,
     input::{self, InputEvent, KeyEvent},
-    keyboard, matrix, mouse, paging, print, println, reboot, rtc, serial, shutdown, timer, vga,
+    keyboard, matrix, mouse, paging, print, println, reboot, rtc, serial, shutdown, timer, ui,
+    vga,
 };
 
 const MAX_LINE: usize = 256;
@@ -12,11 +13,13 @@ const MAX_FS_COMPLETION_FILES: usize = 64;
 const EDITOR_MAX_LINES: usize = 128;
 const EDITOR_MAX_LINE_LEN: usize = 200;
 const EDITOR_MAX_BYTES: usize = 4096;
+const UIDEMO_BUTTON_PING_ID: u16 = 10;
+const UIDEMO_BUTTON_EXIT_ID: u16 = 11;
 
-const COMMANDS: [&str; 27] = [
+const COMMANDS: [&str; 28] = [
     "help", "clear", "echo", "info", "disk", "fsinfo", "fsformat", "fsls", "fswrite", "fsdelete",
     "fscat", "edit", "date", "time", "rtc", "paging", "uptime", "heap", "memtest", "hexdump",
-    "mouse", "matrix", "gfxdemo", "color", "reboot", "shutdown", "panic",
+    "mouse", "matrix", "gfxdemo", "uidemo", "color", "reboot", "shutdown", "panic",
 ];
 
 struct TextDocument {
@@ -448,6 +451,7 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("  mouse - show mouse position/buttons");
             shell_println!("  matrix - matrix rain (press any key to exit)");
             shell_println!("  gfxdemo - draw framebuffer primitives demo");
+            shell_println!("  uidemo - UI dispatcher/widgets demo");
             shell_println!("  color - set text colors");
             shell_println!("  reboot - reboot machine");
             shell_println!("  shutdown - power off machine");
@@ -542,6 +546,9 @@ fn execute_line(bytes: &[u8]) {
         }
         "gfxdemo" => {
             handle_gfxdemo_command();
+        }
+        "uidemo" => {
+            handle_uidemo_command();
         }
         "color" => {
             handle_color_command(parts);
@@ -1096,6 +1103,250 @@ fn handle_gfxdemo_command() {
     }
 
     vga::clear_screen();
+}
+
+fn handle_uidemo_command() {
+    let Some((fb_width, fb_height)) = vga::framebuffer_resolution() else {
+        shell_println!("uidemo requires VBE/framebuffer mode");
+        return;
+    };
+
+    let width = fb_width.min(i32::MAX as usize) as i32;
+    let height = fb_height.min(i32::MAX as usize) as i32;
+    if width <= 0 || height <= 0 {
+        shell_println!("uidemo: invalid framebuffer size");
+        return;
+    }
+
+    let Some((_, font_h)) = vga::font_metrics() else {
+        shell_println!("uidemo: font metrics unavailable");
+        return;
+    };
+
+    shell_println!("uidemo: Tab to focus, Enter/Space to activate, q to exit");
+    for _ in 0..512 {
+        if input::pop_event().is_none() {
+            break;
+        }
+    }
+
+    let panel_margin = 24;
+    let panel = ui::Rect::new(
+        panel_margin,
+        panel_margin,
+        width - panel_margin * 2,
+        height - panel_margin * 2,
+    );
+    if panel.width <= 200 || panel.height <= 140 {
+        shell_println!("uidemo: framebuffer is too small");
+        return;
+    }
+
+    let title_height = (font_h as i32 + 10).max(20);
+    let title_rect = ui::Rect::new(panel.x + 16, panel.y + 16, panel.width - 32, title_height);
+    let hint_rect = ui::Rect::new(
+        panel.x + 16,
+        title_rect.y + title_rect.height + 8,
+        panel.width - 32,
+        title_height,
+    );
+
+    let button_height = (font_h as i32 + 18).max(30);
+    let button_width = ((panel.width - 56) / 2).max(96);
+    let button_y = panel.y + panel.height - button_height - 24;
+    let ping_rect = ui::Rect::new(panel.x + 20, button_y, button_width, button_height);
+    let exit_rect = ui::Rect::new(
+        panel.x + panel.width - button_width - 20,
+        button_y,
+        button_width,
+        button_height,
+    );
+
+    let status_height = (font_h as i32 + 10).max(18);
+    let status_y = (button_y - status_height - 10).max(hint_rect.y + hint_rect.height + 8);
+    let status_rect = ui::Rect::new(panel.x + 16, status_y, panel.width - 32, status_height);
+
+    let mut dispatcher = ui::EventDispatcher::new();
+    if dispatcher
+        .add_panel(ui::Panel::new(1, panel, 0x0D1424, 0x00E5FF))
+        .is_err()
+    {
+        shell_println!("uidemo: failed to allocate panel widget");
+        return;
+    }
+
+    if dispatcher
+        .add_label(ui::Label::new(
+            2,
+            title_rect,
+            "Event Dispatcher + Widgets",
+            0xE8F1FF,
+            0x111A2E,
+        ))
+        .is_err()
+    {
+        shell_println!("uidemo: failed to allocate title widget");
+        return;
+    }
+
+    if dispatcher
+        .add_label(ui::Label::new(
+            3,
+            hint_rect,
+            "Mouse click routes by hit-region. Tab changes keyboard focus.",
+            0xB7C7E4,
+            0x111A2E,
+        ))
+        .is_err()
+    {
+        shell_println!("uidemo: failed to allocate hint widget");
+        return;
+    }
+
+    let mut ping_button = ui::Button::new(UIDEMO_BUTTON_PING_ID, ping_rect, "PING");
+    ping_button.fill_normal = 0x1A2B45;
+    ping_button.fill_hover = 0x224171;
+    ping_button.fill_pressed = 0x112238;
+    ping_button.border = 0x00E5FF;
+    ping_button.border_focused = 0x39FF14;
+    ping_button.text_color = 0xF3F7FF;
+    if dispatcher.add_button(ping_button).is_err() {
+        shell_println!("uidemo: failed to allocate ping button");
+        return;
+    }
+
+    let mut exit_button = ui::Button::new(UIDEMO_BUTTON_EXIT_ID, exit_rect, "EXIT");
+    exit_button.fill_normal = 0x3A1538;
+    exit_button.fill_hover = 0x552059;
+    exit_button.fill_pressed = 0x2A102A;
+    exit_button.border = 0xFF00FF;
+    exit_button.border_focused = 0x39FF14;
+    exit_button.text_color = 0xFFE8FF;
+    if dispatcher.add_button(exit_button).is_err() {
+        shell_println!("uidemo: failed to allocate exit button");
+        return;
+    }
+
+    let _ = dispatcher.focus_first();
+
+    let mut status_kind = UidemoStatus::Ready;
+    draw_uidemo_background(width, height);
+    draw_uidemo_scene(&dispatcher, status_rect, status_kind);
+    let arm_input_after = timer::ticks().wrapping_add(25);
+
+    loop {
+        let batch = dispatcher.poll_and_dispatch(128);
+        let mut redraw = batch.redraw;
+
+        if let Some(key) = batch.key_press {
+            if matches!(key, KeyEvent::Char('q') | KeyEvent::Char('Q')) {
+                break;
+            }
+        }
+
+        if let Some(clicked) = batch.clicked {
+            let armed = timer::ticks().wrapping_sub(arm_input_after) < (u32::MAX / 2);
+            if armed {
+                if clicked == UIDEMO_BUTTON_PING_ID {
+                    status_kind = UidemoStatus::PingClicked;
+                    redraw = true;
+                } else if clicked == UIDEMO_BUTTON_EXIT_ID {
+                    status_kind = UidemoStatus::ExitClicked;
+                    redraw = true;
+                }
+            }
+        }
+
+        if redraw {
+            draw_uidemo_scene(&dispatcher, status_rect, status_kind);
+            if matches!(status_kind, UidemoStatus::ExitClicked) {
+                break;
+            }
+        }
+
+        if batch.processed == 0 {
+            unsafe {
+                core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
+
+    vga::clear_screen();
+}
+
+#[derive(Clone, Copy)]
+enum UidemoStatus {
+    Ready,
+    PingClicked,
+    ExitClicked,
+}
+
+fn draw_uidemo_scene(
+    dispatcher: &ui::EventDispatcher,
+    status_rect: ui::Rect,
+    status_kind: UidemoStatus,
+) {
+    vga::begin_draw_batch();
+    dispatcher.draw();
+    draw_uidemo_status_bar(status_rect, dispatcher.focused_widget(), status_kind);
+    vga::end_draw_batch();
+}
+
+fn draw_uidemo_background(width: i32, height: i32) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let _ = vga::draw_filled_rect(0, 0, width, height, 0x070B14);
+}
+
+fn draw_uidemo_status_bar(status_rect: ui::Rect, focus: Option<u16>, status_kind: UidemoStatus) {
+    let message = match (status_kind, focus) {
+        (UidemoStatus::ExitClicked, _) => "Exit clicked. Leaving demo...",
+        (UidemoStatus::PingClicked, Some(UIDEMO_BUTTON_EXIT_ID)) => {
+            "PING clicked. Focus on EXIT (Enter/Space or click)."
+        }
+        (UidemoStatus::PingClicked, Some(UIDEMO_BUTTON_PING_ID)) => {
+            "PING clicked. Focus on PING (Tab to move focus)."
+        }
+        (UidemoStatus::PingClicked, _) => "PING clicked. Focus none (Tab or click a button).",
+        (UidemoStatus::Ready, Some(UIDEMO_BUTTON_EXIT_ID)) => {
+            "Focus: EXIT. Enter/Space activates focused button."
+        }
+        (UidemoStatus::Ready, Some(UIDEMO_BUTTON_PING_ID)) => {
+            "Focus: PING. Enter/Space activates focused button."
+        }
+        (UidemoStatus::Ready, _) => "Focus: none. Tab/click to focus, q to exit.",
+    };
+
+    let _ = vga::draw_filled_rect(
+        status_rect.x,
+        status_rect.y,
+        status_rect.width,
+        status_rect.height,
+        0x0D1B2E,
+    );
+    let _ = vga::draw_horizontal_line(
+        status_rect.x,
+        status_rect.y,
+        status_rect.width,
+        0x4A6FA8,
+    );
+    let _ = vga::draw_horizontal_line(
+        status_rect.x,
+        status_rect
+            .y
+            .saturating_add(status_rect.height)
+            .saturating_sub(1),
+        status_rect.width,
+        0x4A6FA8,
+    );
+
+    if let Some((_, font_h)) = vga::font_metrics() {
+        let text_y = status_rect
+            .y
+            .saturating_add(((status_rect.height - font_h as i32) / 2).max(1));
+        let _ = vga::draw_text(status_rect.x + 8, text_y, message, 0xDFEAFF, 0x0D1B2E);
+    }
 }
 
 fn handle_mouse_command() {

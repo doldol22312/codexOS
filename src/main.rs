@@ -23,6 +23,7 @@ mod serial;
 mod shell;
 mod shutdown;
 mod timer;
+mod ui;
 pub mod vga;
 
 use core::alloc::Layout;

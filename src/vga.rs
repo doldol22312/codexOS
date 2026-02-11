@@ -112,6 +112,8 @@ struct FramebufferState {
     mouse_saved_w: usize,
     mouse_saved_h: usize,
     mouse_saved_pixels: [u32; MOUSE_CURSOR_SAVE_WIDTH * MOUSE_CURSOR_SAVE_HEIGHT],
+    draw_batch_depth: u32,
+    draw_batch_dirty: Option<(usize, usize, usize, usize)>,
 }
 
 static mut INITIALIZED: bool = false;
@@ -449,6 +451,15 @@ pub fn framebuffer_resolution() -> Option<(usize, usize)> {
     }
 }
 
+pub fn font_metrics() -> Option<(usize, usize)> {
+    ensure_initialized();
+    unsafe {
+        FRAMEBUFFER
+            .as_ref()
+            .map(|state| (FONT_WIDTH, state.font_height.max(1)))
+    }
+}
+
 pub fn set_mouse_cursor(x: i32, y: i32, visible: bool) {
     ensure_initialized();
 
@@ -474,6 +485,40 @@ pub fn draw_filled_rect(x: i32, y: i32, width: i32, height: i32, rgb: u32) -> bo
         fill_rect_clipped(state, x, y, width, height, rgb);
     }
     true
+}
+
+pub fn begin_draw_batch() {
+    ensure_initialized();
+    unsafe {
+        let Some(state) = FRAMEBUFFER.as_mut() else {
+            return;
+        };
+        state.draw_batch_depth = state.draw_batch_depth.saturating_add(1);
+    }
+}
+
+pub fn end_draw_batch() {
+    ensure_initialized();
+    unsafe {
+        let Some(state) = FRAMEBUFFER.as_mut() else {
+            return;
+        };
+        if state.draw_batch_depth == 0 {
+            return;
+        }
+
+        state.draw_batch_depth -= 1;
+        if state.draw_batch_depth != 0 {
+            return;
+        }
+
+        let Some((x0, y0, x1, y1)) = state.draw_batch_dirty.take() else {
+            return;
+        };
+        if x0 < x1 && y0 < y1 {
+            flush_backbuffer_rect(state, x0, y0, x1 - x0, y1 - y0);
+        }
+    }
 }
 
 pub fn draw_horizontal_line(x: i32, y: i32, length: i32, rgb: u32) -> bool {
@@ -532,6 +577,53 @@ pub fn draw_line(x0: i32, y0: i32, x1: i32, y1: i32, rgb: u32) -> bool {
             if twice_err <= dx {
                 err += dx;
                 y += sy;
+            }
+        }
+
+        flush_dirty_rect(state, dirty);
+    }
+    true
+}
+
+pub fn draw_text(x: i32, y: i32, text: &str, foreground: u32, background: u32) -> bool {
+    ensure_initialized();
+    unsafe {
+        let Some(state) = FRAMEBUFFER.as_mut() else {
+            return false;
+        };
+        prepare_raw_framebuffer_draw(state);
+
+        let mut dirty: Option<(usize, usize, usize, usize)> = None;
+        let origin_x = x;
+        let mut cursor_x = x;
+        let mut cursor_y = y;
+        let line_height = state.font_height.max(1) as i32;
+
+        for byte in text.bytes() {
+            match byte {
+                b'\n' => {
+                    cursor_x = origin_x;
+                    cursor_y = cursor_y.saturating_add(line_height);
+                }
+                b'\r' => {
+                    cursor_x = origin_x;
+                }
+                value => {
+                    let glyph = match value {
+                        0x20..=0x7E => value,
+                        _ => b'?',
+                    };
+                    draw_glyph_rgb_clipped(
+                        state,
+                        cursor_x,
+                        cursor_y,
+                        glyph,
+                        foreground,
+                        background,
+                        &mut dirty,
+                    );
+                    cursor_x = cursor_x.saturating_add(FONT_WIDTH as i32);
+                }
             }
         }
 
@@ -846,6 +938,56 @@ unsafe fn draw_pixel_clipped(
     let index = y_usize * state.surface_width + x_usize;
     state.back[index] = rgb;
     expand_dirty_rect(dirty, x_usize, y_usize, x_usize + 1, y_usize + 1);
+}
+
+#[inline]
+unsafe fn draw_glyph_rgb_clipped(
+    state: &mut FramebufferState,
+    x: i32,
+    y: i32,
+    glyph: u8,
+    foreground: u32,
+    background: u32,
+    dirty: &mut Option<(usize, usize, usize, usize)>,
+) {
+    let cell_height = state.font_height.max(1);
+    let sw = state.surface_width as i32;
+    let sh = state.surface_height as i32;
+    if sw <= 0 || sh <= 0 {
+        return;
+    }
+
+    for row in 0..cell_height {
+        let py = y.saturating_add(row as i32);
+        if py < 0 || py >= sh {
+            continue;
+        }
+
+        let bits = glyph_bits(state, glyph, row);
+        let row_offset = py as usize * state.surface_width;
+        for col in 0..FONT_WIDTH {
+            let px = x.saturating_add(col as i32);
+            if px < 0 || px >= sw {
+                continue;
+            }
+
+            let mask = 0x80u8 >> col;
+            let color = if (bits & mask) != 0 {
+                foreground
+            } else {
+                background
+            };
+            state.back[row_offset + px as usize] = color;
+        }
+    }
+
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = x.saturating_add(FONT_WIDTH as i32).min(sw);
+    let y1 = y.saturating_add(cell_height as i32).min(sh);
+    if x0 < x1 && y0 < y1 {
+        expand_dirty_rect(dirty, x0 as usize, y0 as usize, x1 as usize, y1 as usize);
+    }
 }
 
 #[inline]
@@ -1476,6 +1618,17 @@ unsafe fn flush_backbuffer_rect(
         return;
     }
 
+    if state.draw_batch_depth > 0 {
+        expand_dirty_rect(
+            &mut state.draw_batch_dirty,
+            x_start,
+            y_start,
+            x_end,
+            y_end,
+        );
+        return;
+    }
+
     let refresh_cursor = state.mouse_cursor_drawn
         && rects_intersect(
             x_start,
@@ -1856,6 +2009,8 @@ fn try_init_framebuffer() -> Option<(FramebufferState, usize, usize)> {
             mouse_saved_w: 0,
             mouse_saved_h: 0,
             mouse_saved_pixels: [0; MOUSE_CURSOR_SAVE_WIDTH * MOUSE_CURSOR_SAVE_HEIGHT],
+            draw_batch_depth: 0,
+            draw_batch_dirty: None,
         },
         cols,
         rows,
