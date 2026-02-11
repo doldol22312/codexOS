@@ -389,6 +389,34 @@ pub fn write_file(name: &str, data: &[u8]) -> Result<(), FsError> {
     Ok(())
 }
 
+pub fn delete_file(name: &str) -> Result<(), FsError> {
+    let mut state = require_mounted_state()?;
+    let (name_bytes, name_len) = normalize_name(name)?;
+
+    let Some(found) = find_entry(state, &name_bytes, name_len)? else {
+        return Err(FsError::NotFound);
+    };
+
+    let entry = found.entry;
+    if entry.allocated_sectors > 0 {
+        let end_lba = entry
+            .start_lba
+            .checked_add(entry.allocated_sectors)
+            .ok_or(FsError::Corrupt)?;
+
+        // Reclaim space only if this file is the most recent allocation.
+        if end_lba == state.next_free_lba {
+            state.next_free_lba = entry.start_lba;
+        }
+    }
+
+    persist_entry(found.sector_lba, found.slot_index, DirectoryEntry::empty())?;
+    state.file_count = state.file_count.saturating_sub(1);
+    persist_state(state)?;
+
+    Ok(())
+}
+
 fn load_state_from_disk() -> Result<FsState, FsError> {
     let Some(disk) = ata::info() else {
         return Err(FsError::DiskUnavailable);

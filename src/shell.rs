@@ -219,6 +219,7 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("  fsformat - format custom filesystem");
             shell_println!("  fsls  - list filesystem files");
             shell_println!("  fswrite <name> <text> - write a text file");
+            shell_println!("  fsdelete <name> - delete a file");
             shell_println!("  fscat <name> - read a text file");
             shell_println!("  date  - show date from RTC (fallback: uptime)");
             shell_println!("  time  - show time from RTC (fallback: uptime)");
@@ -280,6 +281,7 @@ fn execute_line(bytes: &[u8]) {
         "fsformat" => handle_fsformat_command(),
         "fsls" => handle_fsls_command(),
         "fswrite" => handle_fswrite_command(parts),
+        "fsdelete" => handle_fsdelete_command(parts),
         "fscat" => handle_fscat_command(parts),
         "date" => print_date(),
         "time" => print_time(),
@@ -589,6 +591,21 @@ where
     match fs::write_file(name, &data[..length]) {
         Ok(()) => shell_println!("wrote {} bytes to {}", length, name),
         Err(error) => shell_println!("fswrite failed: {}", error.as_str()),
+    }
+}
+
+fn handle_fsdelete_command<'a, I>(mut parts: I)
+where
+    I: Iterator<Item = &'a str>,
+{
+    let Some(name) = parts.next() else {
+        shell_println!("usage: fsdelete <name>");
+        return;
+    };
+
+    match fs::delete_file(name) {
+        Ok(()) => shell_println!("deleted {}", name),
+        Err(error) => shell_println!("fsdelete failed: {}", error.as_str()),
     }
 }
 
