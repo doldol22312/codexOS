@@ -33,6 +33,18 @@ pub unsafe fn inb(port: u16) -> u8 {
 }
 
 #[inline]
+pub unsafe fn inw(port: u16) -> u16 {
+    let mut value: u16;
+    asm!(
+        "in ax, dx",
+        in("dx") port,
+        out("ax") value,
+        options(nomem, nostack, preserves_flags)
+    );
+    value
+}
+
+#[inline]
 pub unsafe fn io_wait() {
     asm!(
         "out 0x80, al",

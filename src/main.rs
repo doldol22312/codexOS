@@ -3,7 +3,9 @@
 #![feature(alloc_error_handler)]
 
 mod allocator;
+mod ata;
 mod boot;
+mod fs;
 mod gdt;
 mod idt;
 mod interrupts;
@@ -47,6 +49,25 @@ pub extern "C" fn kernel_main() -> ! {
     serial_println!("boot: pic ready");
     timer::init(100);
     serial_println!("boot: pit ready ({}hz)", timer::frequency_hz());
+    ata::init();
+    if let Some(disk) = ata::info() {
+        serial_println!(
+            "boot: ata ready ({} sectors, {} bytes)",
+            disk.sectors,
+            disk.sectors as u64 * disk.sector_size as u64
+        );
+    } else {
+        serial_println!("boot: ata unavailable");
+    }
+    fs::init();
+    serial_println!(
+        "boot: fs {}",
+        if fs::is_mounted() {
+            "mounted"
+        } else {
+            "unmounted"
+        }
+    );
     let rtc_ready = rtc::init();
     serial_println!(
         "boot: rtc {}",
