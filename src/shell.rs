@@ -1,8 +1,11 @@
 use core::str;
 
+extern crate alloc;
+use alloc::vec;
+
 use crate::{
     allocator, ata, fs,
-    input::{self, InputEvent, KeyEvent},
+    input::{self, InputEvent, KeyEvent, MouseButton},
     keyboard, matrix, mouse, paging, print, println, reboot, rtc, serial, shutdown, timer, ui,
     vga,
 };
@@ -15,11 +18,24 @@ const EDITOR_MAX_LINE_LEN: usize = 200;
 const EDITOR_MAX_BYTES: usize = 4096;
 const UIDEMO_BUTTON_PING_ID: u16 = 10;
 const UIDEMO_BUTTON_EXIT_ID: u16 = 11;
+const UIDEMO2_TEXTBOX_ID: u16 = 200;
+const UIDEMO2_TEXTAREA_ID: u16 = 201;
+const UIDEMO2_CHECKBOX_ID: u16 = 202;
+const UIDEMO2_RADIO_A_ID: u16 = 203;
+const UIDEMO2_RADIO_B_ID: u16 = 204;
+const UIDEMO2_DROPDOWN_ID: u16 = 205;
+const UIDEMO2_COMBO_ID: u16 = 206;
+const UIDEMO2_SCROLL_H_ID: u16 = 207;
+const UIDEMO2_SCROLL_V_ID: u16 = 208;
+const UIDEMO2_LIST_ID: u16 = 209;
+const UIDEMO2_TREE_ID: u16 = 210;
+const UIDEMO2_PROGRESS_ID: u16 = 211;
+const UIDEMO2_POPUP_ID: u16 = 212;
 
-const COMMANDS: [&str; 28] = [
+const COMMANDS: [&str; 29] = [
     "help", "clear", "echo", "info", "disk", "fsinfo", "fsformat", "fsls", "fswrite", "fsdelete",
     "fscat", "edit", "date", "time", "rtc", "paging", "uptime", "heap", "memtest", "hexdump",
-    "mouse", "matrix", "gfxdemo", "uidemo", "color", "reboot", "shutdown", "panic",
+    "mouse", "matrix", "gfxdemo", "uidemo", "uidemo2", "color", "reboot", "shutdown", "panic",
 ];
 
 struct TextDocument {
@@ -452,6 +468,7 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("  matrix - matrix rain (press any key to exit)");
             shell_println!("  gfxdemo - draw framebuffer primitives demo");
             shell_println!("  uidemo - UI dispatcher/widgets demo");
+            shell_println!("  uidemo2 - advanced widget showcase");
             shell_println!("  color - set text colors");
             shell_println!("  reboot - reboot machine");
             shell_println!("  shutdown - power off machine");
@@ -549,6 +566,9 @@ fn execute_line(bytes: &[u8]) {
         }
         "uidemo" => {
             handle_uidemo_command();
+        }
+        "uidemo2" => {
+            handle_uidemo2_command();
         }
         "color" => {
             handle_color_command(parts);
@@ -1346,6 +1366,404 @@ fn draw_uidemo_status_bar(status_rect: ui::Rect, focus: Option<u16>, status_kind
             .y
             .saturating_add(((status_rect.height - font_h as i32) / 2).max(1));
         let _ = vga::draw_text(status_rect.x + 8, text_y, message, 0xDFEAFF, 0x0D1B2E);
+    }
+}
+
+fn handle_uidemo2_command() {
+    let Some((fb_width, fb_height)) = vga::framebuffer_resolution() else {
+        shell_println!("uidemo2 requires VBE/framebuffer mode");
+        return;
+    };
+
+    let width = fb_width.min(i32::MAX as usize) as i32;
+    let height = fb_height.min(i32::MAX as usize) as i32;
+    if width <= 0 || height <= 0 {
+        shell_println!("uidemo2: invalid framebuffer size");
+        return;
+    }
+
+    let Some((_, font_h)) = vga::font_metrics() else {
+        shell_println!("uidemo2: font metrics unavailable");
+        return;
+    };
+
+    shell_println!("uidemo2: Tab focus, right-click for context menu, q to exit");
+    for _ in 0..512 {
+        if input::pop_event().is_none() {
+            break;
+        }
+    }
+
+    let margin = 14;
+    let panel = ui::Rect::new(margin, margin, width - margin * 2, height - margin * 2);
+    if panel.width <= 520 || panel.height <= 380 {
+        shell_println!("uidemo2: framebuffer is too small");
+        return;
+    }
+
+    let gutter = 10;
+    let row_h = (font_h as i32 + 10).max(22);
+    let title_rect = ui::Rect::new(panel.x + gutter, panel.y + gutter, panel.width - 2 * gutter, row_h);
+    let subtitle_rect = ui::Rect::new(
+        panel.x + gutter,
+        title_rect.y + title_rect.height + 4,
+        panel.width - 2 * gutter,
+        row_h,
+    );
+    let status_rect = ui::Rect::new(
+        panel.x + gutter,
+        panel.y + panel.height - row_h - gutter,
+        panel.width - 2 * gutter,
+        row_h,
+    );
+
+    let content_top = subtitle_rect.y + subtitle_rect.height + 8;
+    let content_bottom = status_rect.y - 8;
+    let content_height = content_bottom - content_top;
+    if content_height <= row_h * 8 {
+        shell_println!("uidemo2: framebuffer is too small for layout");
+        return;
+    }
+
+    let col_w = ((panel.width - gutter * 3) / 2).max(240);
+    let left_x = panel.x + gutter;
+    let right_x = left_x + col_w + gutter;
+
+    let mut left_y = content_top;
+    let textbox_rect = ui::Rect::new(left_x, left_y, col_w - 2, row_h);
+    left_y += row_h + 6;
+    let dropdown_rect = ui::Rect::new(left_x, left_y, col_w - 2, row_h);
+    left_y += row_h + 6;
+    let combo_rect = ui::Rect::new(left_x, left_y, col_w - 2, row_h);
+    left_y += row_h + 6;
+    let checkbox_rect = ui::Rect::new(left_x, left_y, col_w - 2, row_h);
+    left_y += row_h + 4;
+    let radio_a_rect = ui::Rect::new(left_x, left_y, col_w - 2, row_h);
+    left_y += row_h + 4;
+    let radio_b_rect = ui::Rect::new(left_x, left_y, col_w - 2, row_h);
+    left_y += row_h + 8;
+    let hscroll_rect = ui::Rect::new(left_x, left_y, col_w - 2, 14);
+    left_y += 14 + 8;
+    let progress_rect = ui::Rect::new(left_x, left_y, col_w - 2, row_h);
+
+    let textarea_h = (content_height / 3).max(row_h * 4);
+    let textarea_rect = ui::Rect::new(right_x, content_top, col_w - 20, textarea_h);
+    let vscroll_rect = ui::Rect::new(right_x + col_w - 14, content_top, 12, textarea_h);
+
+    let list_y = textarea_rect.y + textarea_rect.height + 8;
+    let list_h = (content_height / 3).max(row_h * 4);
+    let list_rect = ui::Rect::new(right_x, list_y, col_w - 2, list_h);
+
+    let tree_y = list_rect.y + list_rect.height + 8;
+    let tree_h = (content_bottom - tree_y).max(row_h * 3);
+    let tree_rect = ui::Rect::new(right_x, tree_y, col_w - 2, tree_h);
+
+    let mut dispatcher = ui::EventDispatcher::new();
+    if dispatcher
+        .add_panel(ui::Panel::new(100, panel, 0x0C1323, 0x00E5FF))
+        .is_err()
+    {
+        shell_println!("uidemo2: failed to allocate panel");
+        return;
+    }
+    if dispatcher
+        .add_label(ui::Label::new(
+            101,
+            title_rect,
+            "UI Demo 2: Advanced Widget Set",
+            0xE8F1FF,
+            0x131C2F,
+        ))
+        .is_err()
+    {
+        shell_println!("uidemo2: failed to allocate title");
+        return;
+    }
+    if dispatcher
+        .add_label(ui::Label::new(
+            102,
+            subtitle_rect,
+            "Text, selection, list/tree, combo/dropdown, scrollbars, progress, popup menu",
+            0xB7C7E4,
+            0x131C2F,
+        ))
+        .is_err()
+    {
+        shell_println!("uidemo2: failed to allocate subtitle");
+        return;
+    }
+
+    let mut text_box = ui::TextBox::new(UIDEMO2_TEXTBOX_ID, textbox_rect);
+    text_box.placeholder = "single-line input";
+    text_box.set_text("edit me");
+    if dispatcher.add_text_box(text_box).is_err() {
+        shell_println!("uidemo2: failed to allocate textbox");
+        return;
+    }
+
+    let mut dropdown = ui::Dropdown::new(
+        UIDEMO2_DROPDOWN_ID,
+        dropdown_rect,
+        vec!["Debug", "Release", "Safe", "Turbo"],
+    );
+    dropdown.selected = 1;
+    if dispatcher.add_dropdown(dropdown).is_err() {
+        shell_println!("uidemo2: failed to allocate dropdown");
+        return;
+    }
+
+    let combo = ui::ComboBox::new(
+        UIDEMO2_COMBO_ID,
+        combo_rect,
+        vec!["alpha", "beta", "gamma", "delta", "omega"],
+    );
+    if dispatcher.add_combo_box(combo).is_err() {
+        shell_println!("uidemo2: failed to allocate combobox");
+        return;
+    }
+
+    let mut checkbox = ui::Checkbox::new(UIDEMO2_CHECKBOX_ID, checkbox_rect, "Enable telemetry");
+    checkbox.checked = true;
+    if dispatcher.add_checkbox(checkbox).is_err() {
+        shell_println!("uidemo2: failed to allocate checkbox");
+        return;
+    }
+
+    let mut radio_a = ui::RadioButton::new(UIDEMO2_RADIO_A_ID, 1, radio_a_rect, "Renderer: Raster");
+    radio_a.selected = true;
+    if dispatcher.add_radio_button(radio_a).is_err() {
+        shell_println!("uidemo2: failed to allocate radio A");
+        return;
+    }
+
+    let radio_b = ui::RadioButton::new(UIDEMO2_RADIO_B_ID, 1, radio_b_rect, "Renderer: Vector");
+    if dispatcher.add_radio_button(radio_b).is_err() {
+        shell_println!("uidemo2: failed to allocate radio B");
+        return;
+    }
+
+    let mut h_scroll = ui::Scrollbar::new(UIDEMO2_SCROLL_H_ID, hscroll_rect, ui::Orientation::Horizontal);
+    h_scroll.max = 100;
+    h_scroll.page = 20;
+    h_scroll.value = 35;
+    if dispatcher.add_scrollbar(h_scroll).is_err() {
+        shell_println!("uidemo2: failed to allocate horizontal scrollbar");
+        return;
+    }
+
+    let mut progress = ui::ProgressBar::new(UIDEMO2_PROGRESS_ID, progress_rect);
+    progress.max = 100;
+    progress.value = 35;
+    progress.foreground = 0x39FF14;
+    if dispatcher.add_progress_bar(progress).is_err() {
+        shell_println!("uidemo2: failed to allocate progress bar");
+        return;
+    }
+
+    let mut text_area = ui::TextArea::new(UIDEMO2_TEXTAREA_ID, textarea_rect);
+    text_area.placeholder = "multi-line input";
+    text_area.set_text("This is TextArea.\nType here.\nUse arrows and PageUp/PageDown.");
+    if dispatcher.add_text_area(text_area).is_err() {
+        shell_println!("uidemo2: failed to allocate textarea");
+        return;
+    }
+
+    let mut v_scroll = ui::Scrollbar::new(UIDEMO2_SCROLL_V_ID, vscroll_rect, ui::Orientation::Vertical);
+    v_scroll.max = 100;
+    v_scroll.page = 25;
+    v_scroll.value = 40;
+    if dispatcher.add_scrollbar(v_scroll).is_err() {
+        shell_println!("uidemo2: failed to allocate vertical scrollbar");
+        return;
+    }
+
+    let mut list_view = ui::ListView::new(
+        UIDEMO2_LIST_ID,
+        list_rect,
+        vec![
+            "kernel.log",
+            "drivers/",
+            "boot/",
+            "README.md",
+            "Cargo.toml",
+            "src/",
+            "build/",
+            "target/",
+            "notes.txt",
+            "assets/",
+        ],
+    );
+    list_view.selected = Some(0);
+    if dispatcher.add_list_view(list_view).is_err() {
+        shell_println!("uidemo2: failed to allocate list view");
+        return;
+    }
+
+    let nodes = vec![
+        ui::TreeNode::new("root", 0, true, true),
+        ui::TreeNode::new("boot", 1, true, false),
+        ui::TreeNode::new("stage1", 2, false, true),
+        ui::TreeNode::new("stage2", 2, false, true),
+        ui::TreeNode::new("src", 1, true, true),
+        ui::TreeNode::new("ui.rs", 2, false, true),
+        ui::TreeNode::new("shell.rs", 2, false, true),
+        ui::TreeNode::new("vga.rs", 2, false, true),
+        ui::TreeNode::new("tests", 1, true, false),
+        ui::TreeNode::new("integration", 2, false, true),
+    ];
+    let mut tree_view = ui::TreeView::new(UIDEMO2_TREE_ID, tree_rect, nodes);
+    tree_view.selected = Some(0);
+    if dispatcher.add_tree_view(tree_view).is_err() {
+        shell_println!("uidemo2: failed to allocate tree view");
+        return;
+    }
+
+    let popup = ui::PopupMenu::new(
+        UIDEMO2_POPUP_ID,
+        ui::Rect::new(panel.x + 40, panel.y + 40, 180, 24),
+        vec!["Copy", "Paste", "Rename", "Delete", "Properties"],
+    );
+    if dispatcher.add_popup_menu(popup).is_err() {
+        shell_println!("uidemo2: failed to allocate popup menu");
+        return;
+    }
+
+    let _ = dispatcher.focus_first();
+
+    let mut status_message = "Ready: Tab focus, type in TextBox/TextArea, right-click for menu.";
+    draw_uidemo2_background(width, height);
+    draw_uidemo2_scene(&dispatcher, status_rect, status_message);
+
+    'demo: loop {
+        let mut redraw = false;
+        let mut processed = 0usize;
+
+        for _ in 0..128 {
+            let Some(event) = input::pop_event() else {
+                break;
+            };
+            processed += 1;
+
+            match event {
+                InputEvent::KeyPress {
+                    key: KeyEvent::Char('q'),
+                }
+                | InputEvent::KeyPress {
+                    key: KeyEvent::Char('Q'),
+                } => break 'demo,
+                InputEvent::MouseDown {
+                    button: MouseButton::Right,
+                    x,
+                    y,
+                } => {
+                    if dispatcher.show_popup_menu(UIDEMO2_POPUP_ID, x, y) {
+                        status_message = "Context menu opened.";
+                        redraw = true;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+
+            let batch = dispatcher.dispatch_input_event(event);
+            if batch.redraw {
+                redraw = true;
+            }
+
+            if let Some(clicked) = batch.clicked {
+                status_message = uidemo2_status_message(clicked, &dispatcher);
+                redraw = true;
+            }
+        }
+
+        if let Some(value) = dispatcher.scrollbar_value(UIDEMO2_SCROLL_H_ID) {
+            let clamped = value.clamp(0, 100) as u32;
+            if dispatcher.set_progress_value(UIDEMO2_PROGRESS_ID, clamped) {
+                redraw = true;
+            }
+        }
+
+        if redraw {
+            draw_uidemo2_scene(&dispatcher, status_rect, status_message);
+        }
+
+        if processed == 0 {
+            unsafe {
+                core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
+
+    vga::clear_screen();
+}
+
+fn uidemo2_status_message(clicked_id: u16, dispatcher: &ui::EventDispatcher) -> &'static str {
+    match clicked_id {
+        UIDEMO2_TEXTBOX_ID => "TextBox updated.",
+        UIDEMO2_TEXTAREA_ID => "TextArea updated.",
+        UIDEMO2_CHECKBOX_ID => "Checkbox toggled.",
+        UIDEMO2_RADIO_A_ID => "Radio selected: Raster.",
+        UIDEMO2_RADIO_B_ID => "Radio selected: Vector.",
+        UIDEMO2_DROPDOWN_ID => "Dropdown changed.",
+        UIDEMO2_COMBO_ID => "ComboBox changed.",
+        UIDEMO2_SCROLL_H_ID => "Horizontal scrollbar moved.",
+        UIDEMO2_SCROLL_V_ID => "Vertical scrollbar moved.",
+        UIDEMO2_LIST_ID => "ListView selection changed.",
+        UIDEMO2_TREE_ID => "TreeView selection/toggle changed.",
+        UIDEMO2_POPUP_ID => match dispatcher.popup_menu_selected(UIDEMO2_POPUP_ID) {
+            Some(0) => "Popup: Copy",
+            Some(1) => "Popup: Paste",
+            Some(2) => "Popup: Rename",
+            Some(3) => "Popup: Delete",
+            Some(4) => "Popup: Properties",
+            _ => "Popup action",
+        },
+        _ => "Widget interaction.",
+    }
+}
+
+fn draw_uidemo2_scene(
+    dispatcher: &ui::EventDispatcher,
+    status_rect: ui::Rect,
+    status_message: &'static str,
+) {
+    vga::begin_draw_batch();
+    dispatcher.draw();
+    draw_uidemo2_status_bar(status_rect, status_message);
+    vga::end_draw_batch();
+}
+
+fn draw_uidemo2_background(width: i32, height: i32) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let _ = vga::draw_filled_rect(0, 0, width, height, 0x050914);
+}
+
+fn draw_uidemo2_status_bar(status_rect: ui::Rect, message: &'static str) {
+    let _ = vga::draw_filled_rect(
+        status_rect.x,
+        status_rect.y,
+        status_rect.width,
+        status_rect.height,
+        0x11243A,
+    );
+    let _ = vga::draw_horizontal_line(status_rect.x, status_rect.y, status_rect.width, 0x4A6FA8);
+    let _ = vga::draw_horizontal_line(
+        status_rect.x,
+        status_rect
+            .y
+            .saturating_add(status_rect.height)
+            .saturating_sub(1),
+        status_rect.width,
+        0x4A6FA8,
+    );
+
+    if let Some((_, font_h)) = vga::font_metrics() {
+        let text_y = status_rect
+            .y
+            .saturating_add(((status_rect.height - font_h as i32) / 2).max(1));
+        let _ = vga::draw_text(status_rect.x + 8, text_y, message, 0xDFEAFF, 0x11243A);
     }
 }
 

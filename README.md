@@ -8,15 +8,16 @@ A bare-metal operating system written from scratch in Rust for x86 (32-bit). Boo
 - **Memory management** -- 4 KiB paging with identity mapping (256 MB) plus framebuffer virtual mapping, and a free-list heap allocator with block coalescing
 - **Interrupt-driven I/O** -- full IDT/GDT/PIC setup with handlers for CPU exceptions and hardware IRQs
 - **Unified input system** -- single ring-buffer event queue for keyboard + mouse (`KeyPress`, `KeyRelease`, `MouseMove`, `MouseDown`, `MouseUp`, `MouseClick`) with simple hit-testing helpers
+- **UI/event layer** -- central event dispatcher with hit-region routing, focus tracking, and framebuffer widgets (`Panel`, `Label`, `Button`, `TextBox`, `TextArea`, `Checkbox`, `RadioButton`, `Dropdown`, `ComboBox`, `Scrollbar`, `ListView`, `TreeView`, `ProgressBar`, `PopupMenu`)
 - **PS/2 keyboard driver** -- scancode translation, shift/caps lock, arrow/page keys, and key press/release event generation
 - **PS/2 mouse driver** -- 3-byte packet parsing, absolute position tracking, button events, and a hardware-independent framebuffer cursor sprite with background save/restore
-- **Framebuffer text console** -- dynamic text grid from VBE mode, bitmap glyph rendering to double buffer, framebuffer flush optimization, and blinking shell cursor (with VGA fallback)
+- **Framebuffer text console** -- dynamic text grid from VBE mode, bitmap glyph rendering to double buffer, dirty-rect flush optimization, batched redraw support, and blinking shell cursor (with VGA fallback)
 - **Serial port** -- COM1 UART output for debug logging
 - **ATA PIO disk driver** -- 28-bit LBA read/write on the primary master drive
 - **Custom filesystem (CFS1)** -- superblock + directory table + file storage with create, read, write, delete, list, and format operations
 - **PIT timer** -- configurable frequency (default 100 Hz) with uptime tracking
 - **CMOS RTC** -- date and time reads with BCD/binary format handling
-- **Interactive shell** -- 27 built-in commands, command history, tab completion, line editing, and an in-shell text editor
+- **Interactive shell** -- 29 built-in commands, command history, tab completion, line editing, and an in-shell text editor
 - **Matrix screensaver** -- because every OS needs one (press any key to exit)
 
 ## Shell Commands
@@ -46,6 +47,8 @@ A bare-metal operating system written from scratch in Rust for x86 (32-bit). Boo
 | `mouse` | Mouse position and button state |
 | `matrix` | Matrix rain screensaver |
 | `gfxdemo` | Framebuffer primitives demo |
+| `uidemo` | UI dispatcher + widget demo |
+| `uidemo2` | Advanced widget showcase (forms, lists, tree, popup menu) |
 | `color` | Set text colors |
 | `reboot` | Reboot the system |
 | `shutdown` | Power off |
@@ -109,6 +112,7 @@ codexOS/
 │   ├── shell.rs           Interactive command shell
 │   ├── shutdown.rs        ACPI/APM power off
 │   ├── timer.rs           PIT timer (IRQ0)
+│   ├── ui.rs              UI dispatcher + framebuffer widget toolkit
 │   ├── vga.rs             Bitmap-font framebuffer text console
 │   └── bin/
 │       ├── boot_stage1.rs MBR bootloader (512 bytes)
@@ -142,7 +146,7 @@ codexOS/
 |---|---|
 | 0 | Stage 1 bootloader |
 | 1--32 | Stage 2 bootloader |
-| 33--1056 | Kernel binary |
+| 33--1132 | Kernel binary (up to 1100 sectors) |
 
 **Data disk** (`data.img`, 16 MB):
 

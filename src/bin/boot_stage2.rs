@@ -22,7 +22,7 @@ _start:
     mov es, ax
     xor bx, bx
     mov si, 33
-    mov cx, 1024
+    mov cx, 1100
 
 load_kernel:
     cmp cx, 0
@@ -267,7 +267,7 @@ protected_mode_entry:
     cld
     mov esi, 0x00010000
     mov edi, 0x00100000
-    mov ecx, (1024 * 512) / 4
+    mov ecx, (1100 * 512) / 4
     rep movsd
 
     mov eax, 0x00100000

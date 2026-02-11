@@ -19,7 +19,7 @@ STAGE2_BIN := $(BUILD_DIR)/boot_stage2.bin
 FLOPPY_SECTORS := 2880
 DATA_DISK_SECTORS := 32768
 STAGE2_SECTORS := 32
-KERNEL_SECTORS := 1024
+KERNEL_SECTORS := 1100
 KERNEL_LBA := 33
 
 CARGO_FLAGS := -Zjson-target-spec -Zbuild-std=core,alloc,compiler_builtins -Zbuild-std-features=compiler-builtins-mem --target $(TARGET_JSON)
