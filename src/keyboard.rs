@@ -5,6 +5,8 @@ const EVENT_UP: u8 = 0x80;
 const EVENT_DOWN: u8 = 0x81;
 const EVENT_LEFT: u8 = 0x82;
 const EVENT_RIGHT: u8 = 0x83;
+const EVENT_PAGE_UP: u8 = 0x84;
+const EVENT_PAGE_DOWN: u8 = 0x85;
 
 static mut BUFFER: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
 static mut HEAD: usize = 0;
@@ -20,6 +22,8 @@ pub enum KeyEvent {
     Down,
     Left,
     Right,
+    PageUp,
+    PageDown,
 }
 
 pub fn init() {}
@@ -57,6 +61,12 @@ fn process_scancode(scancode: u8) {
                 }
                 0x4D => {
                     push_byte(EVENT_RIGHT);
+                }
+                0x49 => {
+                    push_byte(EVENT_PAGE_UP);
+                }
+                0x51 => {
+                    push_byte(EVENT_PAGE_DOWN);
                 }
                 _ => {}
             }
@@ -196,6 +206,8 @@ pub fn read_key() -> Option<KeyEvent> {
         EVENT_DOWN => Some(KeyEvent::Down),
         EVENT_LEFT => Some(KeyEvent::Left),
         EVENT_RIGHT => Some(KeyEvent::Right),
+        EVENT_PAGE_UP => Some(KeyEvent::PageUp),
+        EVENT_PAGE_DOWN => Some(KeyEvent::PageDown),
         _ if byte < 0x80 => Some(KeyEvent::Char(byte as char)),
         _ => None,
     }

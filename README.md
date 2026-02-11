@@ -7,15 +7,15 @@ A bare-metal operating system written from scratch in Rust for x86 (32-bit). Boo
 - **Custom two-stage bootloader** -- 512-byte MBR stage 1 loads a stage 2 that enables A20, switches to 32-bit protected mode, and jumps to the kernel at 1 MB
 - **Memory management** -- identity-mapped paging (128 MB via 4 MB large pages) and a free-list heap allocator with block coalescing
 - **Interrupt-driven I/O** -- full IDT/GDT/PIC setup with handlers for CPU exceptions and hardware IRQs
-- **PS/2 keyboard driver** -- scancode translation, shift/caps lock, arrow keys, and a 256-byte circular input buffer
+- **PS/2 keyboard driver** -- scancode translation, shift/caps lock, arrow/page keys, and a 256-byte circular input buffer
 - **PS/2 mouse driver** -- 3-byte packet parsing, absolute position tracking, and button state
-- **VGA text mode** -- 80x25 display with color support, hardware cursor, and scrolling
+- **VGA text mode** -- 80x25 display with color support, hardware cursor, scrolling, and PageUp/PageDown scrollback view
 - **Serial port** -- COM1 UART output for debug logging
 - **ATA PIO disk driver** -- 28-bit LBA read/write on the primary master drive
 - **Custom filesystem (CFS1)** -- superblock + directory table + file storage with create, read, write, delete, list, and format operations
 - **PIT timer** -- configurable frequency (default 100 Hz) with uptime tracking
 - **CMOS RTC** -- date and time reads with BCD/binary format handling
-- **Interactive shell** -- 25 built-in commands, command history, tab completion, and line editing
+- **Interactive shell** -- 26 built-in commands, command history, tab completion, line editing, and an in-shell text editor
 - **Matrix screensaver** -- because every OS needs one
 
 ## Shell Commands
@@ -33,6 +33,7 @@ A bare-metal operating system written from scratch in Rust for x86 (32-bit). Boo
 | `fswrite <name> <text>` | Create/write a file |
 | `fscat <name>` | Read a file |
 | `fsdelete <name>` | Delete a file |
+| `edit <name>` | Open simple line editor for a file |
 | `date` | Current date |
 | `time` | Current time |
 | `rtc` | Full RTC status |
@@ -47,6 +48,8 @@ A bare-metal operating system written from scratch in Rust for x86 (32-bit). Boo
 | `reboot` | Reboot the system |
 | `shutdown` | Power off |
 | `panic` | Trigger a kernel panic (for testing) |
+
+Shell input supports command history (`Up`/`Down`), cursor movement (`Left`/`Right`), tab completion for commands and filenames, and output scrolling with `PageUp`/`PageDown`.
 
 ## Building
 
