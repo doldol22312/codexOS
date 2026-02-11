@@ -5,9 +5,11 @@ use crate::{
     keyboard::{self, KeyEvent},
     matrix,
     mouse,
+    paging,
     print,
     println,
     reboot,
+    rtc,
     serial,
     shutdown,
     timer,
@@ -210,8 +212,10 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("  clear - clear screen");
             shell_println!("  echo  - echo arguments");
             shell_println!("  info  - show system info");
-            shell_println!("  date  - show date from PIT ticks");
-            shell_println!("  time  - show time from PIT ticks");
+            shell_println!("  date  - show date from RTC (fallback: uptime)");
+            shell_println!("  time  - show time from RTC (fallback: uptime)");
+            shell_println!("  rtc   - show RTC status and timestamp");
+            shell_println!("  paging - show paging status");
             shell_println!("  uptime - show kernel uptime");
             shell_println!("  heap  - show heap usage");
             shell_println!("  memtest [bytes] - test free heap memory");
@@ -238,15 +242,27 @@ fn execute_line(bytes: &[u8]) {
         }
         "info" => {
             let up = timer::uptime();
+            let paging_state = if paging::is_enabled() { "on" } else { "off" };
+            let rtc_state = if rtc::is_available() {
+                "present"
+            } else {
+                "unavailable"
+            };
             shell_println!("codexOS barebones kernel");
             shell_println!("arch: x86 (32-bit)");
             shell_println!("lang: Rust + inline assembly");
             shell_println!("boot: custom BIOS bootloader");
-            shell_println!("features: VGA, IDT, IRQ keyboard, IRQ mouse, PIT, shell, heap");
+            shell_println!(
+                "features: VGA, IDT, IRQ keyboard, IRQ mouse, PIT, paging={}, RTC={}, shell, free-list heap",
+                paging_state,
+                rtc_state
+            );
             shell_println!("uptime: {}.{:03}s", up.seconds, up.millis);
         }
         "date" => print_date(),
         "time" => print_time(),
+        "rtc" => handle_rtc_command(),
+        "paging" => handle_paging_command(),
         "uptime" => {
             let up = timer::uptime();
             shell_println!(
@@ -352,24 +368,84 @@ fn erase_input_char() {
 }
 
 fn print_date() {
+    if let Some(now) = rtc::now() {
+        shell_println!("{:04}-{:02}-{:02} (RTC)", now.year, now.month, now.day);
+        return;
+    }
+
     let up = timer::uptime();
     let days = (up.seconds / 86_400) as i64;
     let (year, month, day) = civil_from_days(days);
-    shell_println!("date (epoch + uptime): {:04}-{:02}-{:02}", year, month, day);
+    shell_println!(
+        "{:04}-{:02}-{:02} (fallback: epoch + uptime)",
+        year,
+        month,
+        day
+    );
 }
 
 fn print_time() {
+    if let Some(now) = rtc::now() {
+        shell_println!(
+            "{:02}:{:02}:{:02} (RTC)",
+            now.hour,
+            now.minute,
+            now.second
+        );
+        return;
+    }
+
     let up = timer::uptime();
     let seconds_of_day = up.seconds % 86_400;
     let hours = seconds_of_day / 3_600;
     let minutes = (seconds_of_day % 3_600) / 60;
     let seconds = seconds_of_day % 60;
     shell_println!(
-        "time (since boot): {:02}:{:02}:{:02}.{:03}",
+        "{:02}:{:02}:{:02}.{:03} (fallback: since boot)",
         hours,
         minutes,
         seconds,
         up.millis
+    );
+}
+
+fn handle_rtc_command() {
+    shell_println!(
+        "rtc status: {}",
+        if rtc::is_available() {
+            "available"
+        } else {
+            "unavailable"
+        }
+    );
+
+    if let Some(now) = rtc::now() {
+        shell_println!(
+            "rtc now: {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            now.year,
+            now.month,
+            now.day,
+            now.hour,
+            now.minute,
+            now.second
+        );
+    } else {
+        shell_println!("rtc read failed");
+    }
+}
+
+fn handle_paging_command() {
+    let paging = paging::stats();
+    shell_println!(
+        "paging: {}",
+        if paging.enabled { "enabled" } else { "disabled" }
+    );
+    shell_println!("page directory: {:#010x}", paging.directory_phys);
+    shell_println!(
+        "identity map: {} MiB ({} entries x {} MiB pages)",
+        paging.mapped_bytes / (1024 * 1024),
+        paging.mapped_regions,
+        paging.page_size_bytes / (1024 * 1024)
     );
 }
 

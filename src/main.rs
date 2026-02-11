@@ -11,8 +11,10 @@ mod io;
 mod keyboard;
 mod matrix;
 mod mouse;
+mod paging;
 mod pic;
 mod reboot;
+mod rtc;
 mod serial;
 mod shell;
 mod shutdown;
@@ -36,17 +38,27 @@ pub extern "C" fn kernel_main() -> ! {
     serial_println!("boot: gdt ready");
     idt::init();
     serial_println!("boot: idt ready");
+    paging::init();
+    serial_println!(
+        "boot: paging ready ({} MiB identity mapped)",
+        paging::stats().mapped_bytes / (1024 * 1024)
+    );
     pic::init();
     serial_println!("boot: pic ready");
     timer::init(100);
     serial_println!("boot: pit ready ({}hz)", timer::frequency_hz());
+    let rtc_ready = rtc::init();
+    serial_println!(
+        "boot: rtc {}",
+        if rtc_ready { "ready" } else { "unavailable" }
+    );
     keyboard::init();
     serial_println!("boot: keyboard ready");
     mouse::init();
     serial_println!("boot: mouse ready");
 
     unsafe {
-        core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+        core::arch::asm!("sti", options(nomem, nostack));
     }
     serial_println!("boot: interrupts enabled");
 

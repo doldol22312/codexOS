@@ -1,6 +1,6 @@
 use core::arch::global_asm;
 
-use crate::{keyboard, mouse, pic, println, timer};
+use crate::{keyboard, mouse, paging, pic, println, timer};
 use crate::serial_println;
 
 #[repr(C)]
@@ -206,15 +206,27 @@ pub extern "C" fn interrupt_dispatch(frame: *mut InterruptFrame) {
 
 fn handle_exception(frame: &InterruptFrame) -> ! {
     let vector = frame.int_no as usize;
+    let fault_address = if vector == 14 {
+        Some(paging::page_fault_address())
+    } else {
+        None
+    };
+
     serial_println!(
         "exception: vec={} err={:#x} eip={:#x}",
         vector,
         frame.err_code,
         frame.eip
     );
+    if let Some(address) = fault_address {
+        serial_println!("page-fault address: {:#010x}", address);
+    }
     println!();
     println!("EXCEPTION {}: {}", vector, EXCEPTION_MESSAGES[vector]);
     println!("err={} eip={:#010x}", frame.err_code, frame.eip);
+    if let Some(address) = fault_address {
+        println!("addr={:#010x}", address);
+    }
 
     loop {
         unsafe {
