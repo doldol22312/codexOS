@@ -5,6 +5,7 @@ use core::fmt::{self, Write};
 
 use crate::io::outb;
 use crate::paging;
+use crate::timer;
 
 const DEFAULT_COLS: usize = 80;
 const DEFAULT_ROWS: usize = 25;
@@ -16,6 +17,21 @@ const SCROLLBACK_ROWS: usize = 1024;
 
 const FONT_WIDTH: usize = 8;
 const STATUS_LINE_INPUT_WIDTH: usize = 80;
+const CURSOR_BLINK_TICKS: u32 = 50;
+const MOUSE_CURSOR_WIDTH: usize = 16;
+const MOUSE_CURSOR_HEIGHT: usize = 24;
+const MOUSE_CURSOR_SHADOW_OFFSET_X: usize = 1;
+const MOUSE_CURSOR_SHADOW_OFFSET_Y: usize = 1;
+const MOUSE_CURSOR_SAVE_WIDTH: usize = MOUSE_CURSOR_WIDTH + MOUSE_CURSOR_SHADOW_OFFSET_X;
+const MOUSE_CURSOR_SAVE_HEIGHT: usize = MOUSE_CURSOR_HEIGHT + MOUSE_CURSOR_SHADOW_OFFSET_Y;
+const MOUSE_CURSOR_FILL_COLOR: u32 = 0x39FF14;
+const MOUSE_CURSOR_BORDER_COLOR: u32 = 0xFF00FF;
+const MOUSE_CURSOR_SHADOW_COLOR: u32 = 0x101010;
+const MOUSE_CURSOR_BITMAP: [u16; MOUSE_CURSOR_HEIGHT] = [
+    0x8000, 0xC000, 0xE000, 0xF000, 0xF800, 0xFC00, 0xFE00, 0xFF00, 0xFF80, 0xFFC0, 0xFFE0,
+    0xFFF0, 0xFFF8, 0xFC00, 0xFC00, 0xEE00, 0xCE00, 0x8700, 0x0700, 0x0700, 0x0700, 0x0380,
+    0x0380, 0x01C0,
+];
 
 const VGA_BUFFER: *mut u16 = 0xB8000 as *mut u16;
 const DEFAULT_COLOR: u8 = 0x0F;
@@ -87,6 +103,15 @@ struct FramebufferState {
     cursor_drawn: bool,
     last_cursor_row: usize,
     last_cursor_col: usize,
+    mouse_cursor_visible: bool,
+    mouse_cursor_x: i32,
+    mouse_cursor_y: i32,
+    mouse_cursor_drawn: bool,
+    mouse_saved_x: usize,
+    mouse_saved_y: usize,
+    mouse_saved_w: usize,
+    mouse_saved_h: usize,
+    mouse_saved_pixels: [u32; MOUSE_CURSOR_SAVE_WIDTH * MOUSE_CURSOR_SAVE_HEIGHT],
 }
 
 static mut INITIALIZED: bool = false;
@@ -96,6 +121,8 @@ static mut FRAMEBUFFER: Option<FramebufferState> = None;
 static mut CURSOR_ROW: usize = 0;
 static mut CURSOR_COL: usize = 0;
 static mut CURRENT_COLOR: u8 = DEFAULT_COLOR;
+static mut CURSOR_BLINK_VISIBLE: bool = true;
+static mut CURSOR_BLINK_LAST_TICK: u32 = 0;
 
 pub fn init() {
     unsafe {
@@ -120,6 +147,8 @@ pub fn init() {
 
         CURSOR_ROW = 0;
         CURSOR_COL = 0;
+        CURSOR_BLINK_VISIBLE = true;
+        CURSOR_BLINK_LAST_TICK = timer::ticks();
 
         if FRAMEBUFFER.is_none() {
             enable_hardware_cursor();
@@ -231,6 +260,12 @@ fn current_color() -> u8 {
     unsafe { CURRENT_COLOR }
 }
 
+#[inline]
+unsafe fn reset_cursor_blink_locked() {
+    CURSOR_BLINK_VISIBLE = true;
+    CURSOR_BLINK_LAST_TICK = timer::ticks();
+}
+
 pub fn color_code() -> u8 {
     current_color()
 }
@@ -259,6 +294,7 @@ pub fn move_cursor_left(count: usize) {
         let next = index.saturating_sub(count);
         CURSOR_ROW = next / console.cols;
         CURSOR_COL = next % console.cols;
+        reset_cursor_blink_locked();
         render_active_view_locked();
     }
 }
@@ -276,6 +312,7 @@ pub fn move_cursor_right(count: usize) {
         let next = index.saturating_add(count).min(console.max_cursor_index());
         CURSOR_ROW = next / console.cols;
         CURSOR_COL = next % console.cols;
+        reset_cursor_blink_locked();
         render_active_view_locked();
     }
 }
@@ -325,6 +362,7 @@ pub fn clear_screen() {
 
         CURSOR_ROW = 0;
         CURSOR_COL = 0;
+        reset_cursor_blink_locked();
 
         if FRAMEBUFFER.is_none() {
             enable_hardware_cursor();
@@ -383,9 +421,47 @@ pub fn present() {
     }
 }
 
+pub fn tick_cursor_blink() {
+    ensure_initialized();
+
+    unsafe {
+        if FRAMEBUFFER.is_none() {
+            return;
+        }
+
+        let now = timer::ticks();
+        if now.wrapping_sub(CURSOR_BLINK_LAST_TICK) < CURSOR_BLINK_TICKS {
+            return;
+        }
+
+        CURSOR_BLINK_LAST_TICK = now;
+        CURSOR_BLINK_VISIBLE = !CURSOR_BLINK_VISIBLE;
+        render_active_view_locked();
+    }
+}
+
 pub fn framebuffer_resolution() -> Option<(usize, usize)> {
     ensure_initialized();
-    unsafe { FRAMEBUFFER.as_ref().map(|state| (state.surface_width, state.surface_height)) }
+    unsafe {
+        FRAMEBUFFER
+            .as_ref()
+            .map(|state| (state.surface_width, state.surface_height))
+    }
+}
+
+pub fn set_mouse_cursor(x: i32, y: i32, visible: bool) {
+    ensure_initialized();
+
+    unsafe {
+        let Some(state) = FRAMEBUFFER.as_mut() else {
+            return;
+        };
+
+        state.mouse_cursor_x = x;
+        state.mouse_cursor_y = y;
+        state.mouse_cursor_visible = visible;
+        refresh_mouse_cursor_locked(state);
+    }
 }
 
 pub fn draw_filled_rect(x: i32, y: i32, width: i32, height: i32, rgb: u32) -> bool {
@@ -641,13 +717,7 @@ pub fn blit_bitmap(
             dst_slice.copy_from_slice(src_slice);
         }
 
-        flush_backbuffer_rect(
-            state,
-            dst_x_usize,
-            dst_y_usize,
-            copy_w_usize,
-            copy_h_usize,
-        );
+        flush_backbuffer_rect(state, dst_x_usize, dst_y_usize, copy_w_usize, copy_h_usize);
     }
     true
 }
@@ -816,7 +886,7 @@ unsafe fn draw_ellipse_quadrants(
 
 #[inline]
 unsafe fn flush_dirty_rect(
-    state: &FramebufferState,
+    state: &mut FramebufferState,
     dirty: Option<(usize, usize, usize, usize)>,
 ) {
     if let Some((x0, y0, x1, y1)) = dirty {
@@ -891,6 +961,7 @@ unsafe fn backspace_internal() {
         ch: b' ',
         color: current_color(),
     };
+    reset_cursor_blink_locked();
 }
 
 unsafe fn put_char_internal(ch: char) {
@@ -932,6 +1003,7 @@ unsafe fn put_char_internal(ch: char) {
     if CURSOR_ROW >= console.terminal_rows() {
         scroll();
     }
+    reset_cursor_blink_locked();
 }
 
 pub fn page_up() {
@@ -1244,7 +1316,7 @@ unsafe fn render_framebuffer_live_locked(console: &ConsoleState, state: &mut Fra
         );
     }
 
-    if CURSOR_ROW < terminal_rows && CURSOR_COL < cols {
+    if CURSOR_BLINK_VISIBLE && CURSOR_ROW < terminal_rows && CURSOR_COL < cols {
         draw_cursor_overlay(state);
         mark_dirty_cell(&mut dirty, CURSOR_ROW, CURSOR_COL, cell_height);
         state.cursor_drawn = true;
@@ -1261,7 +1333,10 @@ unsafe fn render_framebuffer_live_locked(console: &ConsoleState, state: &mut Fra
     }
 }
 
-unsafe fn render_framebuffer_scrollback_locked(console: &ConsoleState, state: &mut FramebufferState) {
+unsafe fn render_framebuffer_scrollback_locked(
+    console: &ConsoleState,
+    state: &mut FramebufferState,
+) {
     let cols = console.cols;
     let terminal_rows = console.terminal_rows();
 
@@ -1371,23 +1446,27 @@ unsafe fn glyph_bits(state: &FramebufferState, ch: u8, row: usize) -> u8 {
     }
 }
 
-unsafe fn flush_backbuffer(state: &FramebufferState) {
+#[inline]
+fn bytes_per_pixel_for_bpp(bpp: usize) -> usize {
+    match bpp {
+        0..=23 => 2,
+        24..=31 => 3,
+        _ => 4,
+    }
+}
+
+unsafe fn flush_backbuffer(state: &mut FramebufferState) {
     flush_backbuffer_rect(state, 0, 0, state.surface_width, state.surface_height);
 }
 
 unsafe fn flush_backbuffer_rect(
-    state: &FramebufferState,
+    state: &mut FramebufferState,
     x0: usize,
     y0: usize,
     width: usize,
     height: usize,
 ) {
-    let bytes_per_pixel = match state.bpp {
-        0..=15 => 2,
-        16..=23 => 2,
-        24..=31 => 3,
-        _ => 4,
-    };
+    let bytes_per_pixel = bytes_per_pixel_for_bpp(state.bpp);
 
     let x_start = x0.min(state.surface_width);
     let y_start = y0.min(state.surface_height);
@@ -1395,6 +1474,22 @@ unsafe fn flush_backbuffer_rect(
     let y_end = y_start.saturating_add(height).min(state.surface_height);
     if x_start >= x_end || y_start >= y_end {
         return;
+    }
+
+    let refresh_cursor = state.mouse_cursor_drawn
+        && rects_intersect(
+            x_start,
+            y_start,
+            x_end - x_start,
+            y_end - y_start,
+            state.mouse_saved_x,
+            state.mouse_saved_y,
+            state.mouse_saved_w,
+            state.mouse_saved_h,
+        );
+
+    if refresh_cursor {
+        restore_mouse_cursor_locked(state);
     }
 
     for y in y_start..y_end {
@@ -1407,6 +1502,178 @@ unsafe fn flush_backbuffer_rect(
             write_pixel(dst, state.bpp, pixel);
         }
     }
+
+    if state.mouse_cursor_visible && (refresh_cursor || !state.mouse_cursor_drawn) {
+        draw_mouse_cursor_locked(state);
+    }
+}
+
+#[inline]
+fn rects_intersect(
+    ax: usize,
+    ay: usize,
+    aw: usize,
+    ah: usize,
+    bx: usize,
+    by: usize,
+    bw: usize,
+    bh: usize,
+) -> bool {
+    if aw == 0 || ah == 0 || bw == 0 || bh == 0 {
+        return false;
+    }
+
+    let ax1 = ax.saturating_add(aw);
+    let ay1 = ay.saturating_add(ah);
+    let bx1 = bx.saturating_add(bw);
+    let by1 = by.saturating_add(bh);
+
+    ax < bx1 && ax1 > bx && ay < by1 && ay1 > by
+}
+
+unsafe fn refresh_mouse_cursor_locked(state: &mut FramebufferState) {
+    if state.mouse_cursor_drawn {
+        restore_mouse_cursor_locked(state);
+    }
+
+    if state.mouse_cursor_visible {
+        draw_mouse_cursor_locked(state);
+    }
+}
+
+unsafe fn restore_mouse_cursor_locked(state: &mut FramebufferState) {
+    if !state.mouse_cursor_drawn || state.mouse_saved_w == 0 || state.mouse_saved_h == 0 {
+        state.mouse_cursor_drawn = false;
+        return;
+    }
+
+    let bytes_per_pixel = bytes_per_pixel_for_bpp(state.bpp);
+    for row in 0..state.mouse_saved_h {
+        let dst_row = state.front_ptr.add(
+            (state.mouse_saved_y + row) * state.pitch_bytes + state.mouse_saved_x * bytes_per_pixel,
+        );
+        let saved_row = row * MOUSE_CURSOR_SAVE_WIDTH;
+        for col in 0..state.mouse_saved_w {
+            let pixel = state.mouse_saved_pixels[saved_row + col];
+            write_pixel(dst_row.add(col * bytes_per_pixel), state.bpp, pixel);
+        }
+    }
+
+    state.mouse_cursor_drawn = false;
+    state.mouse_saved_w = 0;
+    state.mouse_saved_h = 0;
+}
+
+unsafe fn draw_mouse_cursor_locked(state: &mut FramebufferState) {
+    let sw = state.surface_width as i32;
+    let sh = state.surface_height as i32;
+    if sw <= 0 || sh <= 0 {
+        state.mouse_cursor_drawn = false;
+        return;
+    }
+
+    let x = state.mouse_cursor_x;
+    let y = state.mouse_cursor_y;
+    let shadow_x = x.saturating_add(MOUSE_CURSOR_SHADOW_OFFSET_X as i32);
+    let shadow_y = y.saturating_add(MOUSE_CURSOR_SHADOW_OFFSET_Y as i32);
+
+    let x0 = x.min(shadow_x).max(0);
+    let y0 = y.min(shadow_y).max(0);
+    let x1 = x
+        .saturating_add(MOUSE_CURSOR_WIDTH as i32)
+        .max(shadow_x.saturating_add(MOUSE_CURSOR_WIDTH as i32))
+        .min(sw);
+    let y1 = y
+        .saturating_add(MOUSE_CURSOR_HEIGHT as i32)
+        .max(shadow_y.saturating_add(MOUSE_CURSOR_HEIGHT as i32))
+        .min(sh);
+    if x0 >= x1 || y0 >= y1 {
+        state.mouse_cursor_drawn = false;
+        return;
+    }
+
+    let x0_usize = x0 as usize;
+    let y0_usize = y0 as usize;
+    let width = ((x1 - x0) as usize).min(MOUSE_CURSOR_SAVE_WIDTH);
+    let height = ((y1 - y0) as usize).min(MOUSE_CURSOR_SAVE_HEIGHT);
+    let bytes_per_pixel = bytes_per_pixel_for_bpp(state.bpp);
+
+    state.mouse_saved_x = x0_usize;
+    state.mouse_saved_y = y0_usize;
+    state.mouse_saved_w = width;
+    state.mouse_saved_h = height;
+
+    for row in 0..height {
+        let src_row = state
+            .front_ptr
+            .add((y0_usize + row) * state.pitch_bytes + x0_usize * bytes_per_pixel);
+        let saved_row = row * MOUSE_CURSOR_SAVE_WIDTH;
+        for col in 0..width {
+            state.mouse_saved_pixels[saved_row + col] =
+                read_pixel(src_row.add(col * bytes_per_pixel) as *const u8, state.bpp);
+        }
+    }
+
+    for row in 0..height {
+        let dst_row = state
+            .front_ptr
+            .add((y0_usize + row) * state.pitch_bytes + x0_usize * bytes_per_pixel);
+        let py = y0 + row as i32;
+        for col in 0..width {
+            let px = x0 + col as i32;
+            let sprite_x = px - x;
+            let sprite_y = py - y;
+
+            let color = if cursor_mask_at_signed(sprite_x, sprite_y) {
+                if cursor_mask_border(sprite_x as usize, sprite_y as usize) {
+                    MOUSE_CURSOR_BORDER_COLOR
+                } else {
+                    MOUSE_CURSOR_FILL_COLOR
+                }
+            } else if cursor_mask_at_signed(px - shadow_x, py - shadow_y) {
+                MOUSE_CURSOR_SHADOW_COLOR
+            } else {
+                continue;
+            };
+            write_pixel(dst_row.add(col * bytes_per_pixel), state.bpp, color);
+        }
+    }
+
+    state.mouse_cursor_drawn = true;
+}
+
+#[inline]
+fn cursor_mask_at(x: usize, y: usize) -> bool {
+    if x >= MOUSE_CURSOR_WIDTH || y >= MOUSE_CURSOR_HEIGHT {
+        return false;
+    }
+    let row = MOUSE_CURSOR_BITMAP[y];
+    let mask = 1u16 << (MOUSE_CURSOR_WIDTH - 1 - x);
+    (row & mask) != 0
+}
+
+#[inline]
+fn cursor_mask_at_signed(x: i32, y: i32) -> bool {
+    if x < 0 || y < 0 {
+        return false;
+    }
+    cursor_mask_at(x as usize, y as usize)
+}
+
+#[inline]
+fn cursor_mask_border(x: usize, y: usize) -> bool {
+    if !cursor_mask_at(x, y) {
+        return false;
+    }
+
+    if x == 0 || y == 0 || x + 1 >= MOUSE_CURSOR_WIDTH || y + 1 >= MOUSE_CURSOR_HEIGHT {
+        return true;
+    }
+
+    !cursor_mask_at(x - 1, y)
+        || !cursor_mask_at(x + 1, y)
+        || !cursor_mask_at(x, y - 1)
+        || !cursor_mask_at(x, y + 1)
 }
 
 #[inline]
@@ -1436,6 +1703,36 @@ unsafe fn write_pixel(dst: *mut u8, bpp: usize, rgb: u32) {
         _ => {
             let value = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
             (dst as *mut u32).write_volatile(value);
+        }
+    }
+}
+
+#[inline]
+unsafe fn read_pixel(src: *const u8, bpp: usize) -> u32 {
+    match bpp {
+        0..=15 => {
+            let value = (src as *const u16).read_volatile();
+            let r = ((value >> 10) & 0x1F) as u32;
+            let g = ((value >> 5) & 0x1F) as u32;
+            let b = (value & 0x1F) as u32;
+            ((r * 255 / 31) << 16) | ((g * 255 / 31) << 8) | (b * 255 / 31)
+        }
+        16..=23 => {
+            let value = (src as *const u16).read_volatile();
+            let r = ((value >> 11) & 0x1F) as u32;
+            let g = ((value >> 5) & 0x3F) as u32;
+            let b = (value & 0x1F) as u32;
+            ((r * 255 / 31) << 16) | ((g * 255 / 63) << 8) | (b * 255 / 31)
+        }
+        24..=31 => {
+            let b = src.read_volatile() as u32;
+            let g = src.add(1).read_volatile() as u32;
+            let r = src.add(2).read_volatile() as u32;
+            (r << 16) | (g << 8) | b
+        }
+        _ => {
+            let value = (src as *const u32).read_volatile();
+            value & 0x00FF_FFFF
         }
     }
 }
@@ -1550,6 +1847,15 @@ fn try_init_framebuffer() -> Option<(FramebufferState, usize, usize)> {
             cursor_drawn: false,
             last_cursor_row: 0,
             last_cursor_col: 0,
+            mouse_cursor_visible: false,
+            mouse_cursor_x: 0,
+            mouse_cursor_y: 0,
+            mouse_cursor_drawn: false,
+            mouse_saved_x: 0,
+            mouse_saved_y: 0,
+            mouse_saved_w: 0,
+            mouse_saved_h: 0,
+            mouse_saved_pixels: [0; MOUSE_CURSOR_SAVE_WIDTH * MOUSE_CURSOR_SAVE_HEIGHT],
         },
         cols,
         rows,

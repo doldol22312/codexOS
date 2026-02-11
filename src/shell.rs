@@ -1,21 +1,9 @@
 use core::str;
 
 use crate::{
-    allocator,
-    ata,
-    fs,
-    keyboard::{self, KeyEvent},
-    matrix,
-    mouse,
-    paging,
-    print,
-    println,
-    reboot,
-    rtc,
-    serial,
-    shutdown,
-    timer,
-    vga,
+    allocator, ata, fs,
+    input::{self, InputEvent, KeyEvent},
+    keyboard, matrix, mouse, paging, print, println, reboot, rtc, serial, shutdown, timer, vga,
 };
 
 const MAX_LINE: usize = 256;
@@ -26,33 +14,9 @@ const EDITOR_MAX_LINE_LEN: usize = 200;
 const EDITOR_MAX_BYTES: usize = 4096;
 
 const COMMANDS: [&str; 27] = [
-    "help",
-    "clear",
-    "echo",
-    "info",
-    "disk",
-    "fsinfo",
-    "fsformat",
-    "fsls",
-    "fswrite",
-    "fsdelete",
-    "fscat",
-    "edit",
-    "date",
-    "time",
-    "rtc",
-    "paging",
-    "uptime",
-    "heap",
-    "memtest",
-    "hexdump",
-    "mouse",
-    "matrix",
-    "gfxdemo",
-    "color",
-    "reboot",
-    "shutdown",
-    "panic",
+    "help", "clear", "echo", "info", "disk", "fsinfo", "fsformat", "fsls", "fswrite", "fsdelete",
+    "fscat", "edit", "date", "time", "rtc", "paging", "uptime", "heap", "memtest", "hexdump",
+    "mouse", "matrix", "gfxdemo", "color", "reboot", "shutdown", "panic",
 ];
 
 struct TextDocument {
@@ -201,7 +165,10 @@ impl TextDocument {
 
         for index in 0..self.count {
             let line_len = self.lengths[index];
-            if cursor.checked_add(line_len).is_none_or(|value| value > output.len()) {
+            if cursor
+                .checked_add(line_len)
+                .is_none_or(|value| value > output.len())
+            {
                 return Err("document exceeds max size");
             }
 
@@ -288,7 +255,11 @@ impl History {
     }
 
     fn get(&self, logical_index: usize) -> &[u8] {
-        let oldest_index = if self.count < HISTORY_SIZE { 0 } else { self.head };
+        let oldest_index = if self.count < HISTORY_SIZE {
+            0
+        } else {
+            self.head
+        };
         let physical_index = (oldest_index + logical_index) % HISTORY_SIZE;
         let len = self.lengths[physical_index];
         &self.entries[physical_index][..len]
@@ -333,8 +304,7 @@ pub fn run() -> ! {
                     }
                 }
                 KeyEvent::Down => {
-                    if let Some(replacement) =
-                        navigate_history_down(&history, &mut history_cursor)
+                    if let Some(replacement) = navigate_history_down(&history, &mut history_cursor)
                     {
                         set_input_line(&mut line, &mut len, &mut cursor, replacement);
                     }
@@ -343,8 +313,10 @@ pub fn run() -> ! {
                 KeyEvent::Right => move_cursor_right_in_input(len, &mut cursor),
                 KeyEvent::PageUp => vga::page_up(),
                 KeyEvent::PageDown => vga::page_down(),
+                _ => {}
             }
         } else {
+            vga::tick_cursor_blink();
             unsafe {
                 core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
             }
@@ -362,7 +334,7 @@ enum EscapeState {
 }
 
 fn read_input() -> Option<KeyEvent> {
-    if let Some(key) = keyboard::read_key() {
+    if let Some(key) = input::read_key_press() {
         return Some(key);
     }
 
@@ -389,38 +361,36 @@ fn read_input() -> Option<KeyEvent> {
                 ESCAPE_STATE = EscapeState::None;
                 return None;
             }
-            EscapeState::Csi => {
-                match byte {
-                    b'A' => {
-                        ESCAPE_STATE = EscapeState::None;
-                        KeyEvent::Up
-                    }
-                    b'B' => {
-                        ESCAPE_STATE = EscapeState::None;
-                        KeyEvent::Down
-                    }
-                    b'C' => {
-                        ESCAPE_STATE = EscapeState::None;
-                        KeyEvent::Right
-                    }
-                    b'D' => {
-                        ESCAPE_STATE = EscapeState::None;
-                        KeyEvent::Left
-                    }
-                    b'5' => {
-                        ESCAPE_STATE = EscapeState::Csi5;
-                        return None;
-                    }
-                    b'6' => {
-                        ESCAPE_STATE = EscapeState::Csi6;
-                        return None;
-                    }
-                    _ => {
-                        ESCAPE_STATE = EscapeState::None;
-                        return None;
-                    }
+            EscapeState::Csi => match byte {
+                b'A' => {
+                    ESCAPE_STATE = EscapeState::None;
+                    KeyEvent::Up
                 }
-            }
+                b'B' => {
+                    ESCAPE_STATE = EscapeState::None;
+                    KeyEvent::Down
+                }
+                b'C' => {
+                    ESCAPE_STATE = EscapeState::None;
+                    KeyEvent::Right
+                }
+                b'D' => {
+                    ESCAPE_STATE = EscapeState::None;
+                    KeyEvent::Left
+                }
+                b'5' => {
+                    ESCAPE_STATE = EscapeState::Csi5;
+                    return None;
+                }
+                b'6' => {
+                    ESCAPE_STATE = EscapeState::Csi6;
+                    return None;
+                }
+                _ => {
+                    ESCAPE_STATE = EscapeState::None;
+                    return None;
+                }
+            },
             EscapeState::Csi5 => {
                 ESCAPE_STATE = EscapeState::None;
                 match byte {
@@ -505,7 +475,11 @@ fn execute_line(bytes: &[u8]) {
             } else {
                 "unavailable"
             };
-            let ata_state = if ata::is_present() { "present" } else { "missing" };
+            let ata_state = if ata::is_present() {
+                "present"
+            } else {
+                "missing"
+            };
             let fs_state = if fs::is_mounted() {
                 "mounted"
             } else {
@@ -545,7 +519,10 @@ fn execute_line(bytes: &[u8]) {
             let up = timer::uptime();
             shell_println!(
                 "uptime: {}.{:03}s (ticks={} @ {} Hz)",
-                up.seconds, up.millis, up.ticks, up.hz
+                up.seconds,
+                up.millis,
+                up.ticks,
+                up.hz
             );
         }
         "heap" => {
@@ -558,17 +535,7 @@ fn execute_line(bytes: &[u8]) {
         }
         "memtest" => handle_memtest_command(parts),
         "hexdump" => handle_hexdump_command(parts),
-        "mouse" => {
-            let state = mouse::state();
-            shell_println!(
-                "mouse x={} y={} left={} middle={} right={}",
-                state.x,
-                state.y,
-                if state.left { 1 } else { 0 },
-                if state.middle { 1 } else { 0 },
-                if state.right { 1 } else { 0 }
-            );
-        }
+        "mouse" => handle_mouse_command(),
         "matrix" => {
             shell_println!("matrix mode: press any key to return");
             matrix::run();
@@ -611,10 +578,7 @@ fn navigate_history_up<'a>(history: &'a History, cursor: &mut Option<usize>) -> 
     Some(history.get(next_index))
 }
 
-fn navigate_history_down<'a>(
-    history: &'a History,
-    cursor: &mut Option<usize>,
-) -> Option<&'a [u8]> {
+fn navigate_history_down<'a>(history: &'a History, cursor: &mut Option<usize>) -> Option<&'a [u8]> {
     const EMPTY: &[u8] = &[];
 
     let current = (*cursor)?;
@@ -821,8 +785,7 @@ fn handle_tab_completion(line: &mut [u8; MAX_LINE], len: &mut usize, cursor: &mu
     if completion_len != remove_len {
         line.copy_within(token_end..old_len, token_start + completion_len);
     }
-    line[token_start..token_start + completion_len]
-        .copy_from_slice(&completion[..completion_len]);
+    line[token_start..token_start + completion_len].copy_from_slice(&completion[..completion_len]);
 
     *len = new_len;
     *cursor = token_start + completion_len;
@@ -953,12 +916,7 @@ fn print_date() {
 
 fn print_time() {
     if let Some(now) = rtc::now() {
-        shell_println!(
-            "{:02}:{:02}:{:02} (RTC)",
-            now.hour,
-            now.minute,
-            now.second
-        );
+        shell_println!("{:02}:{:02}:{:02} (RTC)", now.hour, now.minute, now.second);
         return;
     }
 
@@ -1005,7 +963,11 @@ fn handle_paging_command() {
     let paging = paging::stats();
     shell_println!(
         "paging: {}",
-        if paging.enabled { "enabled" } else { "disabled" }
+        if paging.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
     );
     shell_println!("page directory: {:#010x}", paging.directory_phys);
     shell_println!(
@@ -1023,7 +985,10 @@ fn handle_paging_command() {
         }
     );
     if paging.framebuffer_mapped {
-        shell_println!("framebuffer virtual base: {:#010x}", paging.framebuffer_virtual);
+        shell_println!(
+            "framebuffer virtual base: {:#010x}",
+            paging.framebuffer_virtual
+        );
         shell_println!("framebuffer bytes: {}", paging.framebuffer_bytes);
     }
 }
@@ -1042,6 +1007,11 @@ fn handle_gfxdemo_command() {
     }
 
     shell_println!("gfxdemo: press any key to return");
+    for _ in 0..256 {
+        if input::pop_event().is_none() {
+            break;
+        }
+    }
     let key_activity_marker = keyboard::key_activity();
 
     let _ = vga::draw_filled_rect(0, 0, width, height, 0x111520);
@@ -1087,10 +1057,31 @@ fn handle_gfxdemo_command() {
 
     let bottom = (height - ICON_H as i32 - 52).max(0);
     let _ = vga::blit_bitmap(56, bottom, &icon, ICON_W, ICON_H, ICON_W);
-    let _ = vga::blit_bitmap(width - ICON_W as i32 - 56, bottom, &icon, ICON_W, ICON_H, ICON_W);
+    let _ = vga::blit_bitmap(
+        width - ICON_W as i32 - 56,
+        bottom,
+        &icon,
+        ICON_W,
+        ICON_H,
+        ICON_W,
+    );
 
     loop {
-        if keyboard::read_key().is_some() || serial::read_byte().is_some() {
+        if serial::read_byte().is_some() {
+            break;
+        }
+
+        let mut should_exit = false;
+        for _ in 0..128 {
+            let Some(event) = input::pop_event() else {
+                break;
+            };
+            if let InputEvent::KeyPress { .. } = event {
+                should_exit = true;
+                break;
+            }
+        }
+        if should_exit {
             break;
         }
 
@@ -1098,12 +1089,75 @@ fn handle_gfxdemo_command() {
         if current_activity != key_activity_marker {
             break;
         }
+
         unsafe {
             core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
         }
     }
 
     vga::clear_screen();
+}
+
+fn handle_mouse_command() {
+    let state = mouse::state();
+
+    let (width, height, status_height) =
+        if let Some((fb_width, fb_height)) = vga::framebuffer_resolution() {
+            (
+                fb_width.min(i32::MAX as usize) as i32,
+                fb_height.min(i32::MAX as usize) as i32,
+                24i32,
+            )
+        } else {
+            (
+                vga::text_columns().min(i32::MAX as usize) as i32,
+                vga::status_row().saturating_add(1).min(i32::MAX as usize) as i32,
+                1i32,
+            )
+        };
+
+    let terminal_height = height.saturating_sub(status_height).max(1);
+    let status_band_height = height.saturating_sub(terminal_height).max(1);
+    let regions = [
+        input::HitRegion {
+            id: 1,
+            x: 0,
+            y: 0,
+            width,
+            height: terminal_height,
+        },
+        input::HitRegion {
+            id: 2,
+            x: 0,
+            y: terminal_height,
+            width,
+            height: status_band_height,
+        },
+    ];
+
+    let hit_id = input::hit_test_id(&regions, state.x, state.y);
+    let hit_index = input::hit_test_index(&regions, state.x, state.y);
+    let hit_name = match hit_id {
+        Some(1) => "terminal",
+        Some(2) => "status",
+        _ => "none",
+    };
+
+    shell_println!(
+        "mouse x={} y={} left={} middle={} right={}",
+        state.x,
+        state.y,
+        if state.left { 1 } else { 0 },
+        if state.middle { 1 } else { 0 },
+        if state.right { 1 } else { 0 }
+    );
+    shell_println!(
+        "hit-test: {} (id={}, index={})",
+        hit_name,
+        hit_id.unwrap_or(0),
+        hit_index.map(|value| value as i32).unwrap_or(-1)
+    );
+    shell_println!("input queue drops: {}", input::dropped_event_count());
 }
 
 fn handle_disk_command() {
@@ -1120,7 +1174,10 @@ fn handle_disk_command() {
     let model = core::str::from_utf8(&info.model[..model_end]).unwrap_or("unknown");
     let mib = (info.sectors as u64 * info.sector_size as u64) / (1024 * 1024);
 
-    shell_println!("ata disk: {}", if info.present { "present" } else { "missing" });
+    shell_println!(
+        "ata disk: {}",
+        if info.present { "present" } else { "missing" }
+    );
     shell_println!("model: {}", model);
     shell_println!(
         "capacity: {} sectors ({} bytes, {} MiB)",
@@ -1290,7 +1347,11 @@ where
             if truncated {
                 shell_println!("editor: file was truncated to editor limits");
             }
-            shell_println!("editor: loaded {} bytes from {}", result.total_size, filename);
+            shell_println!(
+                "editor: loaded {} bytes from {}",
+                result.total_size,
+                filename
+            );
         }
         Err(fs::FsError::NotFound) => {
             document.load_from_bytes(&[]);
@@ -1316,7 +1377,9 @@ where
     loop {
         let mut input = [0u8; MAX_LINE];
         let len = read_line_interactive("edit> ", &mut input);
-        let line = core::str::from_utf8(&input[..len]).unwrap_or("").trim_end_matches('\r');
+        let line = core::str::from_utf8(&input[..len])
+            .unwrap_or("")
+            .trim_end_matches('\r');
 
         if line.is_empty() {
             continue;
@@ -1439,9 +1502,10 @@ fn read_line_interactive(prompt: &str, line: &mut [u8; MAX_LINE]) -> usize {
                 KeyEvent::Right => move_cursor_right_in_input(len, &mut cursor),
                 KeyEvent::PageUp => vga::page_up(),
                 KeyEvent::PageDown => vga::page_down(),
-                KeyEvent::Up | KeyEvent::Down => {}
+                _ => {}
             }
         } else {
+            vga::tick_cursor_blink();
             unsafe {
                 core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
             }

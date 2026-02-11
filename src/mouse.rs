@@ -1,3 +1,4 @@
+use crate::input::{self, InputEvent, MouseButton};
 use crate::io::{inb, outb};
 use crate::vga;
 
@@ -43,7 +44,8 @@ pub fn init() {
         PACKET_INDEX = 0;
     }
 
-    render_status_line();
+    let state = state();
+    vga::set_mouse_cursor(state.x, state.y, true);
 }
 
 pub fn handle_interrupt() {
@@ -56,11 +58,9 @@ pub fn handle_interrupt() {
 
         PACKET[PACKET_INDEX] = byte;
         PACKET_INDEX += 1;
-
         if PACKET_INDEX < 3 {
             return;
         }
-
         PACKET_INDEX = 0;
 
         let flags = PACKET[0];
@@ -72,15 +72,34 @@ pub fn handle_interrupt() {
         let dy = PACKET[2] as i8 as i32;
         let (screen_width, screen_height) = screen_bounds();
 
-        let new_x = clamp_i32(MOUSE_X + dx, 0, screen_width - 1);
-        let new_y = clamp_i32(MOUSE_Y - dy, 0, screen_height - 1);
+        let old_x = MOUSE_X;
+        let old_y = MOUSE_Y;
+        let old_buttons = BUTTONS;
+
+        let new_x = clamp_i32(old_x + dx, 0, screen_width - 1);
+        let new_y = clamp_i32(old_y - dy, 0, screen_height - 1);
+        let new_buttons = flags & 0x07;
 
         MOUSE_X = new_x;
         MOUSE_Y = new_y;
-        BUTTONS = flags & 0x07;
+        BUTTONS = new_buttons;
+
+        let moved_dx = new_x - old_x;
+        let moved_dy = new_y - old_y;
+        if moved_dx != 0 || moved_dy != 0 {
+            input::push_event(InputEvent::MouseMove {
+                x: new_x,
+                y: new_y,
+                dx: moved_dx,
+                dy: moved_dy,
+            });
+        }
+
+        emit_button_events(old_buttons, new_buttons, new_x, new_y);
     }
 
-    render_status_line();
+    let state = state();
+    vga::set_mouse_cursor(state.x, state.y, true);
 }
 
 pub fn state() -> MouseState {
@@ -92,6 +111,31 @@ pub fn state() -> MouseState {
             right: (BUTTONS & 0x02) != 0,
             middle: (BUTTONS & 0x04) != 0,
         }
+    }
+}
+
+fn emit_button_events(old_buttons: u8, new_buttons: u8, x: i32, y: i32) {
+    emit_button_event(old_buttons, new_buttons, 0x01, MouseButton::Left, x, y);
+    emit_button_event(old_buttons, new_buttons, 0x02, MouseButton::Right, x, y);
+    emit_button_event(old_buttons, new_buttons, 0x04, MouseButton::Middle, x, y);
+}
+
+fn emit_button_event(
+    old_buttons: u8,
+    new_buttons: u8,
+    mask: u8,
+    button: MouseButton,
+    x: i32,
+    y: i32,
+) {
+    let was_down = (old_buttons & mask) != 0;
+    let is_down = (new_buttons & mask) != 0;
+
+    if !was_down && is_down {
+        input::push_event(InputEvent::MouseDown { button, x, y });
+    } else if was_down && !is_down {
+        input::push_event(InputEvent::MouseUp { button, x, y });
+        input::push_event(InputEvent::MouseClick { button, x, y });
     }
 }
 
@@ -160,73 +204,6 @@ fn wait_output_full() -> bool {
     false
 }
 
-fn render_status_line() {
-    let mouse = state();
-    let color = vga::color_code();
-    let mut line = [b' '; 80];
-    let mut cursor = 0usize;
-
-    cursor = append_text(&mut line, cursor, "mouse x=");
-    cursor = append_u32(&mut line, cursor, mouse.x as u32);
-    cursor = append_text(&mut line, cursor, " y=");
-    cursor = append_u32(&mut line, cursor, mouse.y as u32);
-    cursor = append_text(&mut line, cursor, " l=");
-    cursor = append_bool(&mut line, cursor, mouse.left);
-    cursor = append_text(&mut line, cursor, " m=");
-    cursor = append_bool(&mut line, cursor, mouse.middle);
-    cursor = append_text(&mut line, cursor, " r=");
-    let _ = append_bool(&mut line, cursor, mouse.right);
-
-    vga::write_status_line(&line, color);
-}
-
-fn append_text(buffer: &mut [u8; 80], mut cursor: usize, text: &str) -> usize {
-    for byte in text.bytes() {
-        if cursor >= buffer.len() {
-            return cursor;
-        }
-        buffer[cursor] = byte;
-        cursor += 1;
-    }
-    cursor
-}
-
-fn append_bool(buffer: &mut [u8; 80], cursor: usize, value: bool) -> usize {
-    if value {
-        append_text(buffer, cursor, "1")
-    } else {
-        append_text(buffer, cursor, "0")
-    }
-}
-
-fn append_u32(buffer: &mut [u8; 80], mut cursor: usize, mut value: u32) -> usize {
-    if cursor >= buffer.len() {
-        return cursor;
-    }
-
-    if value == 0 {
-        buffer[cursor] = b'0';
-        return cursor + 1;
-    }
-
-    let mut digits = [0u8; 10];
-    let mut count = 0usize;
-
-    while value > 0 && count < digits.len() {
-        digits[count] = (value % 10) as u8 + b'0';
-        value /= 10;
-        count += 1;
-    }
-
-    while count > 0 && cursor < buffer.len() {
-        count -= 1;
-        buffer[cursor] = digits[count];
-        cursor += 1;
-    }
-
-    cursor
-}
-
 fn clamp_i32(value: i32, min: i32, max: i32) -> i32 {
     if value < min {
         min
@@ -238,6 +215,12 @@ fn clamp_i32(value: i32, min: i32, max: i32) -> i32 {
 }
 
 fn screen_bounds() -> (i32, i32) {
+    if let Some((width, height)) = vga::framebuffer_resolution() {
+        let width = width.max(1).min(i32::MAX as usize) as i32;
+        let height = height.max(1).min(i32::MAX as usize) as i32;
+        return (width, height);
+    }
+
     let width = vga::text_columns().max(1).min(i32::MAX as usize) as i32;
     let height = vga::status_row()
         .saturating_add(1)

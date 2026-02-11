@@ -4,11 +4,12 @@
 
 mod allocator;
 mod ata;
-mod bootinfo;
 mod boot;
+mod bootinfo;
 mod fs;
 mod gdt;
 mod idt;
+mod input;
 mod interrupts;
 mod io;
 mod keyboard;
@@ -92,6 +93,8 @@ pub extern "C" fn kernel_main() -> ! {
         "boot: rtc {}",
         if rtc_ready { "ready" } else { "unavailable" }
     );
+    input::init();
+    serial_println!("boot: input queue ready");
     keyboard::init();
     serial_println!("boot: keyboard ready");
     mouse::init();

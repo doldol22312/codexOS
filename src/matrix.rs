@@ -2,7 +2,8 @@ extern crate alloc;
 
 use alloc::vec;
 
-use crate::{keyboard, serial, timer, vga};
+use crate::input::InputEvent;
+use crate::{input, keyboard, serial, timer, vga};
 
 const TRAIL_LEN: i32 = 8;
 const HEAD_COLOR: u8 = 0x0A;
@@ -43,7 +44,14 @@ pub fn run() {
         last_tick = now;
 
         for _ in 0..elapsed {
-            update_frame(&mut heads, &mut speeds, &mut cooldown, width, height, &mut rng);
+            update_frame(
+                &mut heads,
+                &mut speeds,
+                &mut cooldown,
+                width,
+                height,
+                &mut rng,
+            );
             if exit_requested(&mut key_activity_marker) {
                 break;
             }
@@ -107,14 +115,23 @@ fn update_frame(
 }
 
 #[inline]
-fn exit_requested(activity_marker: &mut u32) -> bool {
-    if keyboard::read_key().is_some() || serial::read_byte().is_some() {
+fn exit_requested(key_activity_marker: &mut u32) -> bool {
+    if serial::read_byte().is_some() {
         return true;
     }
 
+    for _ in 0..128 {
+        let Some(event) = input::pop_event() else {
+            break;
+        };
+        if let InputEvent::KeyPress { .. } = event {
+            return true;
+        }
+    }
+
     let current_activity = keyboard::key_activity();
-    if current_activity != *activity_marker {
-        *activity_marker = current_activity;
+    if current_activity != *key_activity_marker {
+        *key_activity_marker = current_activity;
         return true;
     }
 
