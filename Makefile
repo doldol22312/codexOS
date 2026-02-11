@@ -43,7 +43,7 @@ kernel: | $(BUILD_STAMP)
 	cargo +nightly rustc $(CARGO_FLAGS) $(PROFILE_FLAG) --bin codex_os
 
 stage1: | $(BUILD_STAMP)
-	cargo +nightly rustc $(CARGO_FLAGS) $(PROFILE_FLAG) --features bootloader-stage1 --bin boot_stage1 -- -C link-arg=-Tstage1.ld
+	cargo +nightly rustc $(CARGO_FLAGS) $(PROFILE_FLAG) --features bootloader-stage1 --bin boot_stage1 -- -C link-arg=-Tstage1.ld -C link-arg=--no-eh-frame-hdr
 
 stage2: | $(BUILD_STAMP)
 	cargo +nightly rustc $(CARGO_FLAGS) $(PROFILE_FLAG) --features bootloader-stage2 --bin boot_stage2 -- -C link-arg=-Tstage2.ld
