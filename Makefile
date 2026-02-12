@@ -2,6 +2,7 @@ TARGET_JSON := i686-codex_os.json
 TARGET_TRIPLE := i686-codex_os
 PROFILE ?= release
 QEMU := qemu-system-i386
+QEMU_NET_ARGS := -netdev user,id=n0 -device ne2k_pci,netdev=n0
 
 BUILD_DIR := build
 BUILD_STAMP := $(BUILD_DIR)/.dir
@@ -36,7 +37,7 @@ ifeq ($(PROFILE),release)
 PROFILE_FLAG := --release
 endif
 
-.PHONY: all build kernel stage1 stage2 image data-image user-hello user-stress inject-user-hello inject-user-stress inject-user-samples run-user-hello run-user-stress run run-serial clean
+.PHONY: all build kernel stage1 stage2 image data-image user-hello user-stress inject-user-hello inject-user-stress inject-user-samples run-user-hello run-user-stress run run-serial discord-bridge clean
 
 all: build
 
@@ -135,16 +136,19 @@ image: $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(BOOT_META_BIN) data-image | $
 	echo "Built boot image: $(IMG_PATH) (stage2 $$STAGE2_SECTORS sectors, kernel $$KERNEL_SECTORS sectors)"
 
 run: image
-	$(QEMU) -drive format=raw,file=$(IMG_PATH),if=floppy -drive format=raw,file=$(DATA_IMG_PATH),if=ide,index=0,media=disk -boot a -m 128M
+	$(QEMU) -drive format=raw,file=$(IMG_PATH),if=floppy -drive format=raw,file=$(DATA_IMG_PATH),if=ide,index=0,media=disk -boot a -m 128M $(QEMU_NET_ARGS)
 
 run-serial: image
-	$(QEMU) -drive format=raw,file=$(IMG_PATH),if=floppy -drive format=raw,file=$(DATA_IMG_PATH),if=ide,index=0,media=disk -boot a -m 128M -display none -serial stdio -monitor none -no-reboot -no-shutdown
+	$(QEMU) -drive format=raw,file=$(IMG_PATH),if=floppy -drive format=raw,file=$(DATA_IMG_PATH),if=ide,index=0,media=disk -boot a -m 128M $(QEMU_NET_ARGS) -display none -serial stdio -monitor none -no-reboot -no-shutdown
 
 run-user-hello: image inject-user-hello
-	$(QEMU) -drive format=raw,file=$(IMG_PATH),if=floppy -drive format=raw,file=$(DATA_IMG_PATH),if=ide,index=0,media=disk -boot a -m 128M -display none -serial stdio -monitor none -no-reboot -no-shutdown
+	$(QEMU) -drive format=raw,file=$(IMG_PATH),if=floppy -drive format=raw,file=$(DATA_IMG_PATH),if=ide,index=0,media=disk -boot a -m 128M $(QEMU_NET_ARGS) -display none -serial stdio -monitor none -no-reboot -no-shutdown
 
 run-user-stress: image inject-user-stress
-	$(QEMU) -drive format=raw,file=$(IMG_PATH),if=floppy -drive format=raw,file=$(DATA_IMG_PATH),if=ide,index=0,media=disk -boot a -m 128M -display none -serial stdio -monitor none -no-reboot -no-shutdown
+	$(QEMU) -drive format=raw,file=$(IMG_PATH),if=floppy -drive format=raw,file=$(DATA_IMG_PATH),if=ide,index=0,media=disk -boot a -m 128M $(QEMU_NET_ARGS) -display none -serial stdio -monitor none -no-reboot -no-shutdown
+
+discord-bridge:
+	python3 tools/discord_bridge.py --bind 0.0.0.0 --port 4242
 
 clean:
 	rm -rf $(BUILD_DIR)

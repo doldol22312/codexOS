@@ -163,6 +163,209 @@ pub(super) fn handle_mouse_command() {
     shell_println!("input queue drops: {}", input::dropped_event_count());
 }
 
+pub(super) fn handle_netinfo_command() {
+    let pci_count = pci::scan();
+    shell_println!("pci devices: {}", pci_count);
+
+    let show = pci_count.min(8);
+    for index in 0..show {
+        let Some(device) = pci::device(index) else {
+            continue;
+        };
+        shell_println!(
+            "  {:02x}:{:02x}.{} {:04x}:{:04x} class {:02x}/{:02x} {}",
+            device.bus,
+            device.slot,
+            device.function,
+            device.vendor_id,
+            device.device_id,
+            device.class_code,
+            device.subclass,
+            pci::class_name(device.class_code, device.subclass)
+        );
+    }
+    if pci_count > show {
+        shell_println!("  ... {} more device(s)", pci_count - show);
+    }
+
+    let net_stats = net::stats();
+    shell_println!(
+        "net initialized: {}",
+        if net_stats.initialized {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    shell_println!(
+        "net online: {} ({})",
+        if net::is_online() { "yes" } else { "no" },
+        net_stats.nic_name
+    );
+    shell_println!(
+        "net polls={} tx={} rx={} dns={} tcp={} last_tick={}",
+        net_stats.polls,
+        net_stats.tx_packets,
+        net_stats.rx_packets,
+        net_stats.dns_queries,
+        net_stats.tcp_connects,
+        net_stats.last_poll_tick
+    );
+    shell_println!(
+        "net arp req={} hits={} dns_ok={} tcp_ok={}",
+        net_stats.arp_requests,
+        net_stats.arp_hits,
+        net_stats.dns_success,
+        net_stats.tcp_established
+    );
+
+    if let Some(ip) = net::local_ipv4() {
+        let mut buf = [0u8; 16];
+        let len = net::format_ipv4(ip, &mut buf);
+        if let Ok(text) = core::str::from_utf8(&buf[..len]) {
+            shell_println!("ip local: {}", text);
+        }
+    }
+    if let Some(ip) = net::gateway_ipv4() {
+        let mut buf = [0u8; 16];
+        let len = net::format_ipv4(ip, &mut buf);
+        if let Ok(text) = core::str::from_utf8(&buf[..len]) {
+            shell_println!("ip gateway: {}", text);
+        }
+    }
+    if let Some(ip) = net::dns_ipv4() {
+        let mut buf = [0u8; 16];
+        let len = net::format_ipv4(ip, &mut buf);
+        if let Ok(text) = core::str::from_utf8(&buf[..len]) {
+            shell_println!("ip dns: {}", text);
+        }
+    }
+    if let Some(mac) = net::mac_address() {
+        let mut mac_buf = [0u8; 18];
+        shell_println!("mac: {}", format_mac(mac, &mut mac_buf));
+    }
+
+    if let Some(ne2k) = net::ne2k::device() {
+        shell_println!(
+            "ne2k: {:02x}:{:02x}.{} io={:#06x} irq={}",
+            ne2k.pci.bus,
+            ne2k.pci.slot,
+            ne2k.pci.function,
+            ne2k.io_base,
+            ne2k.irq_line
+        );
+    } else {
+        shell_println!("ne2k: not found");
+    }
+}
+
+pub(super) fn handle_discordcfg_command() {
+    shell_println!("config file: {}", discord::CONFIG_FILE);
+    match discord::load_config_from_fs() {
+        Ok(config) => {
+            shell_println!("state: ready");
+            shell_println!("bot token: {} bytes", config.token_len());
+
+            let mut token_preview = [0u8; 72];
+            let preview_len = mask_token(config.token().as_bytes(), &mut token_preview);
+            if preview_len > 0 {
+                if let Ok(text) = core::str::from_utf8(&token_preview[..preview_len]) {
+                    shell_println!("bot token preview: {}", text);
+                }
+            }
+
+            let guild_id = config.default_guild_id();
+            if guild_id.is_empty() {
+                shell_println!("default_guild_id: (not set)");
+            } else {
+                shell_println!("default_guild_id: {}", guild_id);
+            }
+
+            let channel_id = config.default_channel_id();
+            if channel_id.is_empty() {
+                shell_println!("default_channel_id: (not set)");
+            } else {
+                shell_println!("default_channel_id: {}", channel_id);
+            }
+
+            let mut ip_buf = [0u8; 16];
+            let ip_len = net::format_ipv4(config.bridge_ip(), &mut ip_buf);
+            if let Ok(ip_text) = core::str::from_utf8(&ip_buf[..ip_len]) {
+                shell_println!("bridge_ip: {}", ip_text);
+            }
+            shell_println!("bridge_port: {}", config.bridge_port());
+            shell_println!("poll_ticks: {}", config.poll_interval_ticks());
+        }
+        Err(error) => {
+            shell_println!("state: {}", error.as_str());
+            shell_println!("expected format:");
+            shell_println!("  bot_token=<token>");
+            shell_println!("  default_guild_id=<optional>");
+            shell_println!("  default_channel_id=<optional>");
+            shell_println!("  bridge_ip=10.0.2.2");
+            shell_println!("  bridge_port=4242");
+            shell_println!("  poll_ticks=120");
+        }
+    }
+}
+
+pub(super) fn handle_discorddiag_command() {
+    let mut client = discord::DiscordClient::from_fs();
+    if net::is_online() {
+        let _ = client.sync_now();
+    } else {
+        client.tick(timer::ticks());
+    }
+    let diag = client.diag();
+
+    shell_println!("discord state: {}", diag.state.as_str());
+    shell_println!(
+        "config present={} token present={} token bytes={}",
+        if diag.config_present { "yes" } else { "no" },
+        if diag.token_present { "yes" } else { "no" },
+        diag.token_len
+    );
+    shell_println!(
+        "guilds={} channels={} messages={} heartbeat={} reconnects={} transport={} handle={}",
+        diag.guild_count,
+        diag.channel_count,
+        diag.message_count,
+        diag.heartbeat_count,
+        diag.reconnect_attempts,
+        if diag.transport_connected {
+            "connected"
+        } else {
+            "down"
+        },
+        diag.transport_handle_id
+    );
+    let mut ip_buf = [0u8; 16];
+    let ip_len = net::format_ipv4(diag.bridge_ip, &mut ip_buf);
+    if let Ok(ip_text) = core::str::from_utf8(&ip_buf[..ip_len]) {
+        shell_println!(
+            "bridge {}:{} poll={} last_sync_tick={}",
+            ip_text,
+            diag.bridge_port,
+            diag.poll_interval_ticks,
+            diag.last_sync_tick
+        );
+    }
+
+    let last_message_id = diag.last_message_id_str();
+    if !last_message_id.is_empty() {
+        shell_println!("last message id: {}", last_message_id);
+    }
+
+    let last_error = diag.last_error_str();
+    if !last_error.is_empty() {
+        shell_println!("last error: {}", last_error);
+    }
+
+    if !net::is_online() {
+        shell_println!("network offline: run `netinfo` for NIC status");
+    }
+}
+
 pub(super) fn handle_memtest_command<'a, I>(mut parts: I)
 where
     I: Iterator<Item = &'a str>,
@@ -269,6 +472,46 @@ fn is_safe_dump_range(start: usize, length: usize) -> bool {
     let vga_end = vga_start + 80 * 25 * 2;
 
     (start >= kernel_start && end <= heap_end) || (start >= vga_start && end <= vga_end)
+}
+
+fn mask_token(token: &[u8], out: &mut [u8]) -> usize {
+    if token.is_empty() || out.is_empty() {
+        return 0;
+    }
+
+    let prefix = token.len().min(4);
+    let suffix = if token.len() > 8 { 4 } else { 0 };
+    let mut len = 0usize;
+
+    for byte in token.iter().copied().take(prefix) {
+        if len >= out.len() {
+            return len;
+        }
+        out[len] = byte;
+        len += 1;
+    }
+
+    let hidden = token.len().saturating_sub(prefix + suffix).max(2);
+    for _ in 0..hidden {
+        if len >= out.len() {
+            return len;
+        }
+        out[len] = b'*';
+        len += 1;
+    }
+
+    if suffix > 0 {
+        let start = token.len().saturating_sub(suffix);
+        for byte in token[start..].iter().copied() {
+            if len >= out.len() {
+                return len;
+            }
+            out[len] = byte;
+            len += 1;
+        }
+    }
+
+    len
 }
 
 fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
@@ -416,5 +659,30 @@ fn color_name(color: u8) -> &'static str {
         0xD => "light-magenta",
         0xE => "yellow",
         _ => "white",
+    }
+}
+
+fn format_mac<'a>(mac: [u8; 6], out: &'a mut [u8; 18]) -> &'a str {
+    let mut index = 0usize;
+    for (part, byte) in mac.iter().copied().enumerate() {
+        if part > 0 && index < out.len() {
+            out[index] = b':';
+            index += 1;
+        }
+        if index + 1 >= out.len() {
+            break;
+        }
+        out[index] = hex_digit((byte >> 4) & 0x0F);
+        out[index + 1] = hex_digit(byte & 0x0F);
+        index += 2;
+    }
+
+    core::str::from_utf8(&out[..index]).unwrap_or("00:00:00:00:00:00")
+}
+
+fn hex_digit(value: u8) -> u8 {
+    match value {
+        0..=9 => b'0' + value,
+        _ => b'a' + (value - 10),
     }
 }

@@ -65,6 +65,18 @@ pub(super) fn handle_mouse_command() {
     system::handle_mouse_command();
 }
 
+pub(super) fn handle_netinfo_command() {
+    system::handle_netinfo_command();
+}
+
+pub(super) fn handle_discordcfg_command() {
+    system::handle_discordcfg_command();
+}
+
+pub(super) fn handle_discorddiag_command() {
+    system::handle_discorddiag_command();
+}
+
 pub(super) fn handle_memtest_command<'a, I>(parts: I)
 where
     I: Iterator<Item = &'a str>,

@@ -1125,12 +1125,13 @@ fn windemo_push_u32<const N: usize>(buffer: &mut [u8; N], len: &mut usize, mut v
     }
 }
 
-const DESKTOP_APP_COUNT: usize = 5;
+const DESKTOP_APP_COUNT: usize = 6;
 const DESKTOP_APP_TERMINAL: usize = 0;
 const DESKTOP_APP_FILES: usize = 1;
 const DESKTOP_APP_MONITOR: usize = 2;
 const DESKTOP_APP_NOTES: usize = 3;
 const DESKTOP_APP_PAINT: usize = 4;
+const DESKTOP_APP_DISCORD: usize = 5;
 const DESKTOP_MAX_TASK_BUTTONS: usize = ui::MAX_WINDOWS;
 const DESKTOP_PANEL_HEIGHT: i32 = 38;
 const DESKTOP_START_BUTTON_WIDTH: i32 = 88;
@@ -1155,6 +1156,7 @@ const DESKTOP_MONITOR_HISTORY: usize = 72;
 const DESKTOP_PAINT_CANVAS_W: usize = 128;
 const DESKTOP_PAINT_CANVAS_H: usize = 80;
 const DESKTOP_PAINT_CANVAS_PIXELS: usize = DESKTOP_PAINT_CANVAS_W * DESKTOP_PAINT_CANVAS_H;
+const DESKTOP_DISCORD_COMPOSER_MAX: usize = 140;
 
 #[derive(Clone, Copy)]
 struct DesktopAppSpec {
@@ -1242,6 +1244,20 @@ const DESKTOP_APP_REGISTRY: [DesktopAppSpec; DESKTOP_APP_COUNT] = [
         fill_a: 0x1C2253,
         fill_b: 0x0C1030,
         stripe: 0x384FA6,
+    },
+    DesktopAppSpec {
+        key: "discord",
+        name: "Discord",
+        description: "bot chat",
+        title: "Discord",
+        rect: ui::Rect::new(168, 110, 472, 284),
+        min_width: 320,
+        min_height: 190,
+        background: 0x10141F,
+        accent: 0x6D86FF,
+        fill_a: 0x1A2340,
+        fill_b: 0x0C1224,
+        stripe: 0x435DC7,
     },
 ];
 
@@ -1739,12 +1755,22 @@ struct DesktopPaintLayout {
     scale: i32,
 }
 
+#[derive(Clone, Copy)]
+struct DesktopDiscordLayout {
+    guilds_rect: ui::Rect,
+    channels_rect: ui::Rect,
+    messages_rect: ui::Rect,
+    composer_rect: ui::Rect,
+    status_rect: ui::Rect,
+}
+
 struct DesktopApps {
     terminal: DesktopTerminalState,
     files: DesktopFilesState,
     monitor: DesktopMonitorState,
     notes: DesktopNotesState,
     paint: DesktopPaintState,
+    discord: DesktopDiscordState,
 }
 
 impl DesktopApps {
@@ -1755,6 +1781,7 @@ impl DesktopApps {
             monitor: DesktopMonitorState::new(start_tick),
             notes: DesktopNotesState::new(),
             paint: DesktopPaintState::new(),
+            discord: DesktopDiscordState::new(),
         }
     }
 
@@ -1767,6 +1794,7 @@ impl DesktopApps {
             DESKTOP_APP_PAINT => {
                 let _ = self.paint.end_stroke();
             }
+            DESKTOP_APP_DISCORD => self.discord.on_launched(),
             _ => {}
         }
     }
@@ -1793,7 +1821,7 @@ fn desktop_handle_app_event(
     manager: &ui::WindowManager,
     running_windows: &[Option<ui::WindowId>; DESKTOP_APP_COUNT],
     event: InputEvent,
-    _tick: u32,
+    tick: u32,
 ) -> bool {
     let mut redraw = false;
 
@@ -1836,6 +1864,9 @@ fn desktop_handle_app_event(
         }
         DESKTOP_APP_PAINT => {
             redraw |= apps.paint.handle_event(event, focused_id, client_rect);
+        }
+        DESKTOP_APP_DISCORD => {
+            redraw |= apps.discord.handle_event(event, client_rect, tick);
         }
         _ => {}
     }
@@ -1932,6 +1963,51 @@ fn desktop_paint_layout(width: usize, height: usize) -> DesktopPaintLayout {
         clear_button,
         canvas_rect: ui::Rect::new(canvas_x, canvas_y, canvas_w, canvas_h),
         scale,
+    }
+}
+
+fn desktop_discord_layout(width: usize, height: usize) -> DesktopDiscordLayout {
+    let w = width as i32;
+    let h = height as i32;
+    let top_h = 24;
+    let status_h = 18;
+    let composer_h = 22;
+
+    let guilds_rect = ui::Rect::new(8, top_h + 6, 108, h.saturating_sub(top_h + status_h + composer_h + 22).max(1));
+    let channels_x = guilds_rect.x.saturating_add(guilds_rect.width).saturating_add(6);
+    let channels_rect = ui::Rect::new(
+        channels_x,
+        top_h + 6,
+        124,
+        guilds_rect.height,
+    );
+    let messages_x = channels_rect.x.saturating_add(channels_rect.width).saturating_add(6);
+    let messages_rect = ui::Rect::new(
+        messages_x,
+        top_h + 6,
+        w.saturating_sub(messages_x + 8).max(1),
+        guilds_rect.height,
+    );
+
+    let composer_rect = ui::Rect::new(
+        8,
+        guilds_rect.y.saturating_add(guilds_rect.height).saturating_add(4),
+        w.saturating_sub(16).max(1),
+        composer_h,
+    );
+    let status_rect = ui::Rect::new(
+        8,
+        composer_rect.y.saturating_add(composer_rect.height).saturating_add(4),
+        w.saturating_sub(16).max(1),
+        status_h,
+    );
+
+    DesktopDiscordLayout {
+        guilds_rect,
+        channels_rect,
+        messages_rect,
+        composer_rect,
+        status_rect,
     }
 }
 
@@ -3549,6 +3625,494 @@ impl DesktopNotesState {
     }
 }
 
+struct DesktopDiscordState {
+    client: discord::DiscordClient,
+    snapshot: discord::DiscordUiSnapshot,
+    compose: [u8; DESKTOP_DISCORD_COMPOSER_MAX],
+    compose_len: usize,
+    scroll: usize,
+    status: [u8; DESKTOP_STATUS_TEXT_MAX],
+    status_len: usize,
+}
+
+impl DesktopDiscordState {
+    fn new() -> Self {
+        let mut state = Self {
+            client: discord::DiscordClient::from_fs(),
+            snapshot: discord::DiscordUiSnapshot::empty(),
+            compose: [0; DESKTOP_DISCORD_COMPOSER_MAX],
+            compose_len: 0,
+            scroll: 0,
+            status: [0; DESKTOP_STATUS_TEXT_MAX],
+            status_len: 0,
+        };
+        state.refresh_snapshot();
+        state.sync_status();
+        state
+    }
+
+    fn refresh_snapshot(&mut self) {
+        self.client.write_ui_snapshot(&mut self.snapshot);
+    }
+
+    fn set_status(&mut self, text: &str) {
+        desktop_set_message(&mut self.status, &mut self.status_len, text);
+    }
+
+    fn sync_status(&mut self) {
+        let diag = self.client.diag();
+        let state = self.client.state_text();
+        let transport = if diag.transport_connected {
+            "online"
+        } else {
+            "offline"
+        };
+        let mut line = [0u8; DESKTOP_STATUS_TEXT_MAX];
+        let mut len = 0usize;
+        windemo_push_bytes(&mut line, &mut len, b"discord ");
+        windemo_push_bytes(&mut line, &mut len, state.as_bytes());
+        windemo_push_bytes(&mut line, &mut len, b" / ");
+        windemo_push_bytes(&mut line, &mut len, transport.as_bytes());
+        if let Ok(text) = str::from_utf8(&line[..len]) {
+            self.set_status(text);
+        }
+    }
+
+    fn on_launched(&mut self) {
+        self.client.reload_from_fs();
+        self.refresh_snapshot();
+        self.sync_status();
+    }
+
+    fn select_channel_delta(&mut self, delta: i32) {
+        if self.snapshot.channel_count == 0 {
+            return;
+        }
+
+        let current = self
+            .snapshot
+            .selected_channel
+            .min(self.snapshot.channel_count.saturating_sub(1));
+        let next = if delta < 0 {
+            current.saturating_sub(delta.wrapping_neg() as usize)
+        } else {
+            current
+                .saturating_add(delta as usize)
+                .min(self.snapshot.channel_count.saturating_sub(1))
+        };
+        self.client
+            .on_ui_action(discord::DiscordUiAction::SelectChannel(next));
+        self.refresh_snapshot();
+    }
+
+    fn submit_compose(&mut self) -> bool {
+        if self.compose_len == 0 {
+            return false;
+        }
+
+        match self
+            .client
+            .send_text_message(&self.compose[..self.compose_len])
+        {
+            Ok(()) => {
+                self.compose_len = 0;
+                self.refresh_snapshot();
+                self.sync_status();
+                true
+            }
+            Err(error) => {
+                self.set_status(error.as_str());
+                true
+            }
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> bool {
+        match key {
+            KeyEvent::Char('\n') => self.submit_compose(),
+            KeyEvent::Char('\x08') => {
+                if self.compose_len == 0 {
+                    return false;
+                }
+                self.compose_len -= 1;
+                true
+            }
+            KeyEvent::Char(ch) if is_printable(ch) => {
+                if self.compose_len >= self.compose.len() {
+                    self.set_status("composer full");
+                    return false;
+                }
+                self.compose[self.compose_len] = ch as u8;
+                self.compose_len += 1;
+                true
+            }
+            KeyEvent::Up => {
+                self.select_channel_delta(-1);
+                true
+            }
+            KeyEvent::Down => {
+                self.select_channel_delta(1);
+                true
+            }
+            KeyEvent::PageUp => {
+                self.scroll = self.scroll.saturating_sub(8);
+                true
+            }
+            KeyEvent::PageDown => {
+                self.scroll = self.scroll.saturating_add(8);
+                true
+            }
+            KeyEvent::Char('r') | KeyEvent::Char('R') => {
+                self.client
+                    .on_ui_action(discord::DiscordUiAction::RefreshConfig);
+                self.refresh_snapshot();
+                self.sync_status();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_mouse_down(&mut self, local_x: i32, local_y: i32, width: usize, height: usize) -> bool {
+        let layout = desktop_discord_layout(width, height);
+        let font_h = desktop_font_height().max(8);
+        let row_h = font_h + 2;
+
+        if local_y < 24 {
+            self.client
+                .on_ui_action(discord::DiscordUiAction::RefreshConfig);
+            self.refresh_snapshot();
+            self.sync_status();
+            return true;
+        }
+
+        if layout.guilds_rect.contains(local_x, local_y) {
+            let row = ((local_y.saturating_sub(layout.guilds_rect.y)) / row_h).max(0) as usize;
+            self.client
+                .on_ui_action(discord::DiscordUiAction::SelectGuild(row));
+            self.refresh_snapshot();
+            return true;
+        }
+
+        if layout.channels_rect.contains(local_x, local_y) {
+            let row = ((local_y.saturating_sub(layout.channels_rect.y)) / row_h).max(0) as usize;
+            self.client
+                .on_ui_action(discord::DiscordUiAction::SelectChannel(row));
+            self.refresh_snapshot();
+            return true;
+        }
+
+        if layout.messages_rect.contains(local_x, local_y) {
+            return false;
+        }
+
+        if layout.composer_rect.contains(local_x, local_y) {
+            return true;
+        }
+
+        false
+    }
+
+    fn handle_event(&mut self, event: InputEvent, client_rect: ui::Rect, tick: u32) -> bool {
+        self.client.tick(tick);
+        self.refresh_snapshot();
+
+        match event {
+            InputEvent::KeyPress { key } => self.handle_key(key),
+            InputEvent::MouseDown {
+                button: MouseButton::Left,
+                ..
+            } => {
+                let Some((local_x, local_y)) = desktop_mouse_local(event, client_rect) else {
+                    return false;
+                };
+                self.handle_mouse_down(
+                    local_x,
+                    local_y,
+                    client_rect.width.max(0) as usize,
+                    client_rect.height.max(0) as usize,
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn draw(
+        &mut self,
+        pixels: &mut [u32],
+        width: usize,
+        height: usize,
+        app: DesktopAppSpec,
+        tick: u32,
+        focused: bool,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        self.client.tick(tick);
+        self.refresh_snapshot();
+        let snapshot = &self.snapshot;
+
+        multdemo_fill_gradient_vertical(pixels, width, height, app.fill_a, app.fill_b);
+        desktop_draw_border(
+            pixels,
+            width,
+            height,
+            ui::Rect::new(0, 0, width as i32, height as i32),
+            app.stripe,
+        );
+
+        let layout = desktop_discord_layout(width, height);
+        let font_h = desktop_font_height().max(8);
+
+        multdemo_fill_rect(pixels, width, height, 0, 0, width as i32, 24, app.background);
+        desktop_draw_text(
+            pixels,
+            width,
+            height,
+            8,
+            6,
+            "Discord (bot client)",
+            0xEAF0FF,
+            app.background,
+        );
+        desktop_draw_text(
+            pixels,
+            width,
+            height,
+            (width as i32).saturating_sub(188),
+            6,
+            snapshot.state.as_str(),
+            if snapshot.state == discord::DiscordState::Ready {
+                0xA7FFB4
+            } else {
+                0xFFB3B3
+            },
+            app.background,
+        );
+
+        for (rect, bg, border) in [
+            (layout.guilds_rect, 0x121E33, 0x3A537C),
+            (layout.channels_rect, 0x111A2D, 0x3A537C),
+            (layout.messages_rect, 0x0E1526, 0x3A537C),
+        ] {
+            multdemo_fill_rect(
+                pixels,
+                width,
+                height,
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                bg,
+            );
+            desktop_draw_border(pixels, width, height, rect, border);
+        }
+
+        desktop_draw_text(
+            pixels,
+            width,
+            height,
+            layout.guilds_rect.x + 6,
+            layout.guilds_rect.y + 3,
+            "Guilds",
+            0xBFD3FF,
+            0x121E33,
+        );
+        desktop_draw_text(
+            pixels,
+            width,
+            height,
+            layout.channels_rect.x + 6,
+            layout.channels_rect.y + 3,
+            "Channels",
+            0xBFD3FF,
+            0x111A2D,
+        );
+        desktop_draw_text(
+            pixels,
+            width,
+            height,
+            layout.messages_rect.x + 6,
+            layout.messages_rect.y + 3,
+            "Messages",
+            0xBFD3FF,
+            0x0E1526,
+        );
+
+        let row_h = font_h + 2;
+        let mut y = layout.guilds_rect.y + font_h + 5;
+        for index in 0..snapshot.guild_count {
+            let guild = snapshot.guilds[index];
+            let selected = index == snapshot.selected_guild;
+            let bg = if selected { 0x2A4168 } else { 0x121E33 };
+            multdemo_fill_rect(
+                pixels,
+                width,
+                height,
+                layout.guilds_rect.x + 1,
+                y,
+                layout.guilds_rect.width.saturating_sub(2),
+                row_h,
+                bg,
+            );
+            desktop_draw_text_bytes(
+                pixels,
+                width,
+                height,
+                layout.guilds_rect.x + 6,
+                y + 1,
+                guild.name_str().as_bytes(),
+                if selected { 0xF4F9FF } else { 0xC3D8FF },
+                bg,
+            );
+            y = y.saturating_add(row_h);
+            if y >= layout.guilds_rect.y.saturating_add(layout.guilds_rect.height).saturating_sub(row_h) {
+                break;
+            }
+        }
+
+        y = layout.channels_rect.y + font_h + 5;
+        for index in 0..snapshot.channel_count {
+            let channel = snapshot.channels[index];
+            let selected = index == snapshot.selected_channel;
+            let bg = if selected { 0x2A4168 } else { 0x111A2D };
+            multdemo_fill_rect(
+                pixels,
+                width,
+                height,
+                layout.channels_rect.x + 1,
+                y,
+                layout.channels_rect.width.saturating_sub(2),
+                row_h,
+                bg,
+            );
+            let mut label = [0u8; 48];
+            let mut len = 0usize;
+            windemo_push_bytes(&mut label, &mut len, b"#");
+            windemo_push_bytes(&mut label, &mut len, channel.name_str().as_bytes());
+            desktop_draw_text_bytes(
+                pixels,
+                width,
+                height,
+                layout.channels_rect.x + 6,
+                y + 1,
+                &label[..len],
+                if selected { 0xF4F9FF } else { 0xC3D8FF },
+                bg,
+            );
+            y = y.saturating_add(row_h);
+            if y >= layout.channels_rect.y.saturating_add(layout.channels_rect.height).saturating_sub(row_h) {
+                break;
+            }
+        }
+
+        let body_y = layout.messages_rect.y + font_h + 5;
+        let visible_rows = ((layout.messages_rect.height.saturating_sub(font_h + 8)) / row_h).max(1) as usize;
+        let start = snapshot
+            .message_count
+            .saturating_sub(visible_rows.saturating_add(self.scroll));
+        let end = snapshot
+            .message_count
+            .saturating_sub(self.scroll.min(snapshot.message_count));
+        let mut row = 0usize;
+        for index in start..end {
+            if index >= snapshot.message_count || row >= visible_rows {
+                break;
+            }
+            let message = snapshot.messages[index];
+            let y = body_y + row as i32 * row_h;
+            let mut line = [0u8; 220];
+            let mut len = 0usize;
+            windemo_push_bytes(&mut line, &mut len, message.author_str().as_bytes());
+            windemo_push_bytes(&mut line, &mut len, b": ");
+            windemo_push_bytes(&mut line, &mut len, message.content_str().as_bytes());
+            desktop_draw_text_bytes(
+                pixels,
+                width,
+                height,
+                layout.messages_rect.x + 6,
+                y + 1,
+                &line[..len],
+                if message.local_echo { 0xD7F0FF } else { 0xC5D7EA },
+                0x0E1526,
+            );
+            row += 1;
+        }
+
+        multdemo_fill_rect(
+            pixels,
+            width,
+            height,
+            layout.composer_rect.x,
+            layout.composer_rect.y,
+            layout.composer_rect.width,
+            layout.composer_rect.height,
+            0x152541,
+        );
+        desktop_draw_border(pixels, width, height, layout.composer_rect, 0x4D72B1);
+        let mut compose_line = [0u8; DESKTOP_DISCORD_COMPOSER_MAX + 4];
+        let mut compose_len = 0usize;
+        windemo_push_bytes(&mut compose_line, &mut compose_len, b"> ");
+        windemo_push_bytes(&mut compose_line, &mut compose_len, &self.compose[..self.compose_len]);
+        desktop_draw_text_bytes(
+            pixels,
+            width,
+            height,
+            layout.composer_rect.x + 6,
+            layout.composer_rect.y + 5,
+            &compose_line[..compose_len],
+            0xEFF5FF,
+            0x152541,
+        );
+
+        if focused && ((tick / 20) & 1) == 0 {
+            let cursor_x = layout
+                .composer_rect
+                .x
+                .saturating_add(6)
+                .saturating_add((compose_len as i32) * 8);
+            multdemo_fill_rect(
+                pixels,
+                width,
+                height,
+                cursor_x,
+                layout.composer_rect.y + 4,
+                1,
+                font_h,
+                0xFFFFFF,
+            );
+        }
+
+        multdemo_fill_rect(
+            pixels,
+            width,
+            height,
+            layout.status_rect.x,
+            layout.status_rect.y,
+            layout.status_rect.width,
+            layout.status_rect.height,
+            0x101A30,
+        );
+        desktop_draw_border(pixels, width, height, layout.status_rect, 0x3A537C);
+        if let Ok(text) = str::from_utf8(&self.status[..self.status_len]) {
+            let max_chars = ((layout.status_rect.width.saturating_sub(12)) / 8).max(0) as usize;
+            let clipped = desktop_trim_text(text, max_chars);
+            desktop_draw_text(
+                pixels,
+                width,
+                height,
+                layout.status_rect.x + 6,
+                layout.status_rect.y + 4,
+                clipped,
+                0xC7D8F7,
+                0x101A30,
+            );
+        }
+    }
+}
+
 struct DesktopPaintState {
     canvas: [u32; DESKTOP_PAINT_CANVAS_PIXELS],
     color_index: usize,
@@ -3920,6 +4484,11 @@ fn desktop_paint_window(
         DESKTOP_APP_PAINT => {
             let _ = manager.with_window_buffer_mut(id, |pixels, width, height| {
                 apps.paint.draw(pixels, width, height, app, tick, focused);
+            });
+        }
+        DESKTOP_APP_DISCORD => {
+            let _ = manager.with_window_buffer_mut(id, |pixels, width, height| {
+                apps.discord.draw(pixels, width, height, app, tick, focused);
             });
         }
         _ => {}

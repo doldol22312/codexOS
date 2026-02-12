@@ -5,7 +5,7 @@ extern crate alloc;
 use alloc::vec;
 
 use crate::{
-    allocator, ata, elf, fs,
+    allocator, ata, discord, elf, fs, net, pci,
     input::{self, InputEvent, KeyEvent, MouseButton},
     keyboard, matrix, mouse, paging, print, println, reboot, rtc, serial, shutdown, sync, task,
     timer, ui, vga,
@@ -15,11 +15,11 @@ const MAX_LINE: usize = 256;
 const HISTORY_SIZE: usize = 32;
 const MAX_FS_COMPLETION_FILES: usize = 64;
 
-const COMMANDS: [&str; 33] = [
+const COMMANDS: [&str; 36] = [
     "help", "clear", "echo", "info", "disk", "fsinfo", "fsformat", "fsls", "fswrite", "fsdelete",
     "fscat", "edit", "elfrun", "date", "time", "rtc", "paging", "uptime", "heap", "memtest",
-    "hexdump", "mouse", "matrix", "multdemo", "gfxdemo", "uidemo", "uidemo2", "windemo",
-    "desktop", "color", "reboot", "shutdown", "panic",
+    "hexdump", "mouse", "netinfo", "discordcfg", "discorddiag", "matrix", "multdemo", "gfxdemo",
+    "uidemo", "uidemo2", "windemo", "desktop", "color", "reboot", "shutdown", "panic",
 ];
 
 macro_rules! shell_print {
@@ -281,6 +281,9 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("  memtest [bytes] - test free heap memory");
             shell_println!("  hexdump <addr> [len] - dump memory");
             shell_println!("  mouse - show mouse position/buttons");
+            shell_println!("  netinfo - show PCI/network status");
+            shell_println!("  discordcfg - inspect discord.cfg bot settings");
+            shell_println!("  discorddiag - run Discord client diagnostics");
             shell_println!("  matrix - matrix rain (press any key to exit)");
             shell_println!("  multdemo [bench [iters]] - graphical multitasking windows demo");
             shell_println!("  gfxdemo - draw framebuffer primitives demo");
@@ -377,6 +380,9 @@ fn execute_line(bytes: &[u8]) {
         "memtest" => commands::handle_memtest_command(parts),
         "hexdump" => commands::handle_hexdump_command(parts),
         "mouse" => commands::handle_mouse_command(),
+        "netinfo" => commands::handle_netinfo_command(),
+        "discordcfg" => commands::handle_discordcfg_command(),
+        "discorddiag" => commands::handle_discorddiag_command(),
         "matrix" => {
             shell_println!("matrix mode: press any key to return");
             matrix::run();

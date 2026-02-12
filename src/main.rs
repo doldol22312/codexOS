@@ -6,6 +6,7 @@ mod allocator;
 mod ata;
 mod boot;
 mod bootinfo;
+mod discord;
 mod elf;
 mod fs;
 mod gdt;
@@ -16,7 +17,9 @@ mod io;
 mod keyboard;
 mod matrix;
 mod mouse;
+mod net;
 mod paging;
+mod pci;
 mod pic;
 mod reboot;
 mod rtc;
@@ -103,6 +106,16 @@ pub extern "C" fn kernel_main() -> ! {
     serial_println!("boot: keyboard ready");
     mouse::init();
     serial_println!("boot: mouse ready");
+    pci::init();
+    serial_println!("boot: pci scan complete ({} devices)", pci::device_count());
+    match net::init() {
+        Ok(()) => {
+            serial_println!("boot: net ready ({})", net::stats().nic_name);
+        }
+        Err(error) => {
+            serial_println!("boot: net unavailable ({:?})", error);
+        }
+    }
     match task::init() {
         Ok(()) => {
             serial_println!("boot: scheduler ready");
