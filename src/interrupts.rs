@@ -1,6 +1,6 @@
 use core::arch::global_asm;
 
-use crate::{keyboard, mouse, paging, pic, println, timer};
+use crate::{keyboard, mouse, paging, pic, println, task, timer};
 use crate::serial_println;
 
 #[repr(C)]
@@ -81,6 +81,7 @@ isr_common:
     push esp
     call interrupt_dispatch
     add esp, 4
+    mov esp, eax
     pop eax
     mov gs, ax
     pop eax
@@ -177,30 +178,39 @@ isr_stub_no_error!(isr44, 44);
 isr_stub_no_error!(isr45, 45);
 isr_stub_no_error!(isr46, 46);
 isr_stub_no_error!(isr47, 47);
+isr_stub_no_error!(isr128, 128);
 
 #[no_mangle]
-pub extern "C" fn interrupt_dispatch(frame: *mut InterruptFrame) {
-    let frame = unsafe { &mut *frame };
-    let vector = frame.int_no as u8;
+pub extern "C" fn interrupt_dispatch(frame: *mut InterruptFrame) -> *mut InterruptFrame {
+    let vector = unsafe { (*frame).int_no as u8 };
 
     match vector {
-        0..=31 => handle_exception(frame),
+        0..=31 => {
+            let frame = unsafe { &*frame };
+            handle_exception(frame)
+        }
         32 => {
             timer::handle_interrupt();
+            let next = task::on_timer_interrupt(frame);
             pic::send_eoi(0);
+            next
         }
         33 => {
             keyboard::handle_interrupt();
             pic::send_eoi(1);
+            frame
         }
         44 => {
             mouse::handle_interrupt();
             pic::send_eoi(12);
+            frame
         }
         34..=47 => {
             pic::send_eoi(vector - 32);
+            frame
         }
-        _ => {}
+        128 => task::handle_syscall(frame),
+        _ => frame,
     }
 }
 

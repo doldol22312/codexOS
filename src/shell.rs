@@ -1,4 +1,5 @@
 use core::str;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 extern crate alloc;
 use alloc::vec;
@@ -6,8 +7,8 @@ use alloc::vec;
 use crate::{
     allocator, ata, fs,
     input::{self, InputEvent, KeyEvent, MouseButton},
-    keyboard, matrix, mouse, paging, print, println, reboot, rtc, serial, shutdown, timer, ui,
-    vga,
+    keyboard, matrix, mouse, paging, print, println, reboot, rtc, serial, shutdown, sync, task,
+    timer, ui, vga,
 };
 
 const MAX_LINE: usize = 256;
@@ -31,11 +32,17 @@ const UIDEMO2_LIST_ID: u16 = 209;
 const UIDEMO2_TREE_ID: u16 = 210;
 const UIDEMO2_PROGRESS_ID: u16 = 211;
 const UIDEMO2_POPUP_ID: u16 = 212;
+const MULTDEMO_WORKERS: usize = 3;
+const MULTDEMO_DEFAULT_ITERATIONS: u32 = 140;
+const MULTDEMO_MAX_ITERATIONS: u32 = 20_000;
+const MULTDEMO_PROGRESS_TICKS: u32 = 20;
+const MULTDEMO_FRAME_TICKS: u32 = 2;
 
-const COMMANDS: [&str; 29] = [
+const COMMANDS: [&str; 31] = [
     "help", "clear", "echo", "info", "disk", "fsinfo", "fsformat", "fsls", "fswrite", "fsdelete",
-    "fscat", "edit", "date", "time", "rtc", "paging", "uptime", "heap", "memtest", "hexdump",
-    "mouse", "matrix", "gfxdemo", "uidemo", "uidemo2", "color", "reboot", "shutdown", "panic",
+    "fscat", "edit", "date", "time", "rtc", "paging", "uptime", "heap", "memtest", "hexdump", "mouse",
+    "matrix", "multdemo", "gfxdemo", "uidemo", "uidemo2", "windemo", "color", "reboot", "shutdown",
+    "panic",
 ];
 
 struct TextDocument {
@@ -466,9 +473,11 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("  hexdump <addr> [len] - dump memory");
             shell_println!("  mouse - show mouse position/buttons");
             shell_println!("  matrix - matrix rain (press any key to exit)");
+            shell_println!("  multdemo [bench [iters]] - graphical multitasking windows demo");
             shell_println!("  gfxdemo - draw framebuffer primitives demo");
             shell_println!("  uidemo - UI dispatcher/widgets demo");
             shell_println!("  uidemo2 - advanced widget showcase");
+            shell_println!("  windemo - multi-window compositor demo");
             shell_println!("  color - set text colors");
             shell_println!("  reboot - reboot machine");
             shell_println!("  shutdown - power off machine");
@@ -561,6 +570,9 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("matrix mode: press any key to return");
             matrix::run();
         }
+        "multdemo" => {
+            handle_multdemo_command(parts);
+        }
         "gfxdemo" => {
             handle_gfxdemo_command();
         }
@@ -569,6 +581,9 @@ fn execute_line(bytes: &[u8]) {
         }
         "uidemo2" => {
             handle_uidemo2_command();
+        }
+        "windemo" => {
+            handle_windemo_command();
         }
         "color" => {
             handle_color_command(parts);
@@ -1765,6 +1780,1700 @@ fn draw_uidemo2_status_bar(status_rect: ui::Rect, message: &'static str) {
             .saturating_add(((status_rect.height - font_h as i32) / 2).max(1));
         let _ = vga::draw_text(status_rect.x + 8, text_y, message, 0xDFEAFF, 0x11243A);
     }
+}
+
+fn handle_windemo_command() {
+    let Some((fb_width, fb_height)) = vga::framebuffer_resolution() else {
+        shell_println!("windemo requires VBE/framebuffer mode");
+        return;
+    };
+
+    let width = fb_width.min(i32::MAX as usize) as i32;
+    let height = fb_height.min(i32::MAX as usize) as i32;
+    if width <= 0 || height <= 0 {
+        shell_println!("windemo: invalid framebuffer size");
+        return;
+    }
+
+    if width < 720 || height < 420 {
+        shell_println!("windemo: framebuffer too small (need at least 720x420)");
+        return;
+    }
+
+    shell_println!(
+        "windemo: drag title bars, resize borders/corners, use window buttons, q exits, d toggles debug"
+    );
+    for _ in 0..512 {
+        if input::pop_event().is_none() {
+            break;
+        }
+    }
+
+    let desktop = ui::Rect::new(0, 0, width, height);
+    let mut manager = ui::WindowManager::new(0x081224);
+
+    let shell_window = manager.add_window(ui::WindowSpec {
+        title: "Shell",
+        rect: ui::Rect::new(52, 54, 420, 260),
+        min_width: 220,
+        min_height: 150,
+        background: 0x0A1A2C,
+        accent: 0x00E5FF,
+    });
+    let monitor_window = manager.add_window(ui::WindowSpec {
+        title: "Monitor",
+        rect: ui::Rect::new(316, 112, 390, 242),
+        min_width: 220,
+        min_height: 150,
+        background: 0x101A11,
+        accent: 0x39FF14,
+    });
+    let tools_window = manager.add_window(ui::WindowSpec {
+        title: "Tools",
+        rect: ui::Rect::new(186, 238, 320, 196),
+        min_width: 180,
+        min_height: 130,
+        background: 0x25190B,
+        accent: 0xFF9E3D,
+    });
+
+    let Ok(shell_id) = shell_window else {
+        shell_println!("windemo: failed to create Shell window");
+        return;
+    };
+    let Ok(monitor_id) = monitor_window else {
+        shell_println!("windemo: failed to create Monitor window");
+        return;
+    };
+    let Ok(tools_id) = tools_window else {
+        shell_println!("windemo: failed to create Tools window");
+        return;
+    };
+
+    paint_windemo_window(&mut manager, shell_id, 0x112A44, 0x0D1E35, 0x21557D);
+    paint_windemo_window(&mut manager, monitor_id, 0x182B18, 0x132013, 0x286C36);
+    paint_windemo_window(&mut manager, tools_id, 0x3A250E, 0x291A0B, 0x8C5C21);
+
+    let mut debug_enabled = false;
+    draw_windemo_scene(&manager, desktop, width, height, debug_enabled);
+
+    'demo: loop {
+        let mut redraw = false;
+        let mut processed = 0usize;
+
+        for _ in 0..128 {
+            let Some(event) = input::pop_event() else {
+                break;
+            };
+            processed += 1;
+
+            match event {
+                InputEvent::KeyPress {
+                    key: KeyEvent::Char('q'),
+                }
+                | InputEvent::KeyPress {
+                    key: KeyEvent::Char('Q'),
+                } => break 'demo,
+                InputEvent::KeyPress {
+                    key: KeyEvent::Char('d'),
+                }
+                | InputEvent::KeyPress {
+                    key: KeyEvent::Char('D'),
+                } => {
+                    debug_enabled = !debug_enabled;
+                    redraw = true;
+                    continue;
+                }
+                _ => {}
+            }
+
+            let response = manager.handle_event(event, desktop);
+            if response.redraw || response.closed.is_some() {
+                redraw = true;
+            }
+            if debug_enabled && matches!(event, InputEvent::MouseMove { .. }) {
+                redraw = true;
+            }
+        }
+
+        if manager.window_count() == 0 {
+            break;
+        }
+
+        if redraw {
+            paint_windemo_window(&mut manager, shell_id, 0x112A44, 0x0D1E35, 0x21557D);
+            paint_windemo_window(&mut manager, monitor_id, 0x182B18, 0x132013, 0x286C36);
+            paint_windemo_window(&mut manager, tools_id, 0x3A250E, 0x291A0B, 0x8C5C21);
+            draw_windemo_scene(&manager, desktop, width, height, debug_enabled);
+        }
+
+        if processed == 0 {
+            unsafe {
+                core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
+
+    vga::clear_screen();
+}
+
+fn paint_windemo_window(
+    manager: &mut ui::WindowManager,
+    id: ui::WindowId,
+    base_a: u32,
+    base_b: u32,
+    stripe: u32,
+) {
+    let _ = manager.with_window_buffer_mut(id, |pixels, width, height| {
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        let cell = 18usize;
+        for y in 0..height {
+            let row = y * width;
+            for x in 0..width {
+                let checker = ((x / cell) + (y / cell)) & 1 == 0;
+                pixels[row + x] = if checker { base_a } else { base_b };
+            }
+        }
+
+        for y in (6..height).step_by(24) {
+            let row = y * width;
+            for x in 6..width.saturating_sub(6) {
+                pixels[row + x] = stripe;
+            }
+        }
+
+        if width >= 3 && height >= 3 {
+            let top = 0usize;
+            let bottom = height - 1;
+            for x in 0..width {
+                pixels[top * width + x] = 0xE8F1FF;
+                pixels[bottom * width + x] = 0xE8F1FF;
+            }
+            for y in 0..height {
+                let row = y * width;
+                pixels[row] = 0xE8F1FF;
+                pixels[row + width - 1] = 0xE8F1FF;
+            }
+        }
+    });
+}
+
+fn draw_windemo_scene(
+    manager: &ui::WindowManager,
+    desktop: ui::Rect,
+    width: i32,
+    height: i32,
+    debug_enabled: bool,
+) {
+    vga::begin_draw_batch();
+    manager.compose(desktop);
+    draw_windemo_overlay_bottom(width, height);
+    if debug_enabled {
+        let pointer = mouse::state();
+        let snapshot = manager.debug_snapshot(pointer.x, pointer.y);
+        draw_windemo_debug_overlay(pointer.x, pointer.y, snapshot);
+    }
+    vga::end_draw_batch();
+}
+
+fn draw_windemo_overlay_bottom(width: i32, height: i32) {
+    let overlay_height = 24;
+    let overlay_width = (width - 24).max(240);
+    let overlay_x = 12;
+    let overlay_y = height.saturating_sub(overlay_height + 10);
+    let _ = vga::draw_filled_rect(overlay_x, overlay_y, overlay_width, overlay_height, 0x0E1B33);
+    let _ = vga::draw_horizontal_line(overlay_x, overlay_y, overlay_width, 0x41658E);
+    let _ = vga::draw_horizontal_line(
+        overlay_x,
+        overlay_y + overlay_height - 1,
+        overlay_width,
+        0x41658E,
+    );
+    let _ = vga::draw_text(
+        overlay_x + 8,
+        overlay_y + 4,
+        "windemo: click+drag/resize, q exits, d debug",
+        0xE1ECFF,
+        0x0E1B33,
+    );
+}
+
+fn draw_windemo_debug_overlay(cursor_x: i32, cursor_y: i32, snapshot: ui::WindowDebugSnapshot) {
+    let panel_x = 12;
+    let panel_y = 12;
+    let panel_w = 420;
+    let panel_h = 74;
+    let bg = 0x13232D;
+    let border = 0x4A7D91;
+    let fg = 0xE4F2F9;
+
+    let _ = vga::draw_filled_rect(panel_x, panel_y, panel_w, panel_h, bg);
+    let _ = vga::draw_horizontal_line(panel_x, panel_y, panel_w, border);
+    let _ = vga::draw_horizontal_line(panel_x, panel_y + panel_h - 1, panel_w, border);
+    let _ = vga::draw_vertical_line(panel_x, panel_y, panel_h, border);
+    let _ = vga::draw_vertical_line(panel_x + panel_w - 1, panel_y, panel_h, border);
+
+    let mut line0 = [0u8; 160];
+    let mut line0_len = 0usize;
+    windemo_push_bytes(&mut line0, &mut line0_len, b"dbg cursor=(");
+    windemo_push_i32(&mut line0, &mut line0_len, cursor_x);
+    windemo_push_bytes(&mut line0, &mut line0_len, b",");
+    windemo_push_i32(&mut line0, &mut line0_len, cursor_y);
+    windemo_push_bytes(&mut line0, &mut line0_len, b")");
+    draw_windemo_debug_line(panel_x + 8, panel_y + 5, &line0[..line0_len], fg, bg);
+
+    let mut line1 = [0u8; 160];
+    let mut line1_len = 0usize;
+    windemo_push_bytes(&mut line1, &mut line1_len, b"hover id=");
+    match snapshot.cursor_window_id {
+        Some(id) => windemo_push_u16(&mut line1, &mut line1_len, id),
+        None => windemo_push_bytes(&mut line1, &mut line1_len, b"none"),
+    }
+    windemo_push_bytes(&mut line1, &mut line1_len, b" frame=");
+    match snapshot.cursor_window_frame {
+        Some(rect) => {
+            windemo_push_i32(&mut line1, &mut line1_len, rect.width);
+            windemo_push_bytes(&mut line1, &mut line1_len, b"x");
+            windemo_push_i32(&mut line1, &mut line1_len, rect.height);
+        }
+        None => windemo_push_bytes(&mut line1, &mut line1_len, b"-"),
+    }
+    draw_windemo_debug_line(panel_x + 8, panel_y + 21, &line1[..line1_len], fg, bg);
+
+    let mut line2 = [0u8; 160];
+    let mut line2_len = 0usize;
+    windemo_push_bytes(&mut line2, &mut line2_len, b"hover client=");
+    match snapshot.cursor_window_client {
+        Some(rect) => {
+            windemo_push_i32(&mut line2, &mut line2_len, rect.width);
+            windemo_push_bytes(&mut line2, &mut line2_len, b"x");
+            windemo_push_i32(&mut line2, &mut line2_len, rect.height);
+        }
+        None => windemo_push_bytes(&mut line2, &mut line2_len, b"-"),
+    }
+    windemo_push_bytes(&mut line2, &mut line2_len, b" focus=");
+    match snapshot.focused_window_id {
+        Some(id) => windemo_push_u16(&mut line2, &mut line2_len, id),
+        None => windemo_push_bytes(&mut line2, &mut line2_len, b"none"),
+    }
+    windemo_push_bytes(&mut line2, &mut line2_len, b" frame=");
+    match snapshot.focused_window_frame {
+        Some(rect) => {
+            windemo_push_i32(&mut line2, &mut line2_len, rect.width);
+            windemo_push_bytes(&mut line2, &mut line2_len, b"x");
+            windemo_push_i32(&mut line2, &mut line2_len, rect.height);
+        }
+        None => windemo_push_bytes(&mut line2, &mut line2_len, b"-"),
+    }
+    draw_windemo_debug_line(panel_x + 8, panel_y + 37, &line2[..line2_len], fg, bg);
+
+    let mut line3 = [0u8; 160];
+    let mut line3_len = 0usize;
+    windemo_push_bytes(&mut line3, &mut line3_len, b"resizing id=");
+    match snapshot.resizing_window_id {
+        Some(id) => windemo_push_u16(&mut line3, &mut line3_len, id),
+        None => windemo_push_bytes(&mut line3, &mut line3_len, b"none"),
+    }
+    windemo_push_bytes(&mut line3, &mut line3_len, b" frame=");
+    match snapshot.resizing_window_frame {
+        Some(rect) => {
+            windemo_push_i32(&mut line3, &mut line3_len, rect.width);
+            windemo_push_bytes(&mut line3, &mut line3_len, b"x");
+            windemo_push_i32(&mut line3, &mut line3_len, rect.height);
+        }
+        None => windemo_push_bytes(&mut line3, &mut line3_len, b"-"),
+    }
+    draw_windemo_debug_line(panel_x + 8, panel_y + 53, &line3[..line3_len], fg, bg);
+}
+
+fn draw_windemo_debug_line(x: i32, y: i32, line: &[u8], fg: u32, bg: u32) {
+    if line.is_empty() {
+        return;
+    }
+    if let Ok(text) = core::str::from_utf8(line) {
+        let _ = vga::draw_text(x, y, text, fg, bg);
+    }
+}
+
+fn windemo_push_bytes<const N: usize>(buffer: &mut [u8; N], len: &mut usize, bytes: &[u8]) {
+    let remain = N.saturating_sub(*len);
+    if remain == 0 {
+        return;
+    }
+    let copy_len = bytes.len().min(remain);
+    buffer[*len..*len + copy_len].copy_from_slice(&bytes[..copy_len]);
+    *len += copy_len;
+}
+
+fn windemo_push_u16<const N: usize>(buffer: &mut [u8; N], len: &mut usize, value: u16) {
+    windemo_push_u32(buffer, len, value as u32);
+}
+
+fn windemo_push_i32<const N: usize>(buffer: &mut [u8; N], len: &mut usize, value: i32) {
+    if value < 0 {
+        windemo_push_bytes(buffer, len, b"-");
+        windemo_push_u32(buffer, len, value.wrapping_neg() as u32);
+    } else {
+        windemo_push_u32(buffer, len, value as u32);
+    }
+}
+
+fn windemo_push_u32<const N: usize>(buffer: &mut [u8; N], len: &mut usize, mut value: u32) {
+    let mut digits = [0u8; 10];
+    let mut count = 0usize;
+    if value == 0 {
+        digits[count] = b'0';
+        count = 1;
+    } else {
+        while value > 0 && count < digits.len() {
+            digits[count] = b'0' + (value % 10) as u8;
+            value /= 10;
+            count += 1;
+        }
+    }
+    for index in (0..count).rev() {
+        windemo_push_bytes(buffer, len, &digits[index..index + 1]);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MultDemoVisualWorkerArg {
+    shared: *const MultDemoVisualShared,
+    slot: usize,
+    phase_step: u32,
+    sleep_ticks: u32,
+}
+
+#[derive(Clone, Copy)]
+struct MultDemoVisualSnapshot {
+    phases: [u32; MULTDEMO_WORKERS],
+    updates: [u32; MULTDEMO_WORKERS],
+    switches: u32,
+    shared_ticks: u32,
+}
+
+struct MultDemoVisualState {
+    phases: [u32; MULTDEMO_WORKERS],
+    updates: [u32; MULTDEMO_WORKERS],
+    switches: u32,
+    shared_ticks: u32,
+    last_task_id: Option<u32>,
+}
+
+impl MultDemoVisualState {
+    const fn new() -> Self {
+        Self {
+            phases: [0; MULTDEMO_WORKERS],
+            updates: [0; MULTDEMO_WORKERS],
+            switches: 0,
+            shared_ticks: 0,
+            last_task_id: None,
+        }
+    }
+}
+
+struct MultDemoVisualShared {
+    state: sync::Mutex<MultDemoVisualState>,
+    gate: sync::Semaphore,
+    stop: AtomicBool,
+    completed: AtomicU32,
+    active_workers: AtomicU32,
+    max_parallel: AtomicU32,
+}
+
+impl MultDemoVisualShared {
+    const fn new() -> Self {
+        Self {
+            state: sync::Mutex::new(MultDemoVisualState::new()),
+            gate: sync::Semaphore::new(2),
+            stop: AtomicBool::new(false),
+            completed: AtomicU32::new(0),
+            active_workers: AtomicU32::new(0),
+            max_parallel: AtomicU32::new(0),
+        }
+    }
+
+    fn snapshot(&self) -> MultDemoVisualSnapshot {
+        let state = self.state.lock();
+        MultDemoVisualSnapshot {
+            phases: state.phases,
+            updates: state.updates,
+            switches: state.switches,
+            shared_ticks: state.shared_ticks,
+        }
+    }
+
+    fn update_max_parallel(&self, candidate: u32) {
+        let mut observed = self.max_parallel.load(Ordering::Acquire);
+        while candidate > observed {
+            match self.max_parallel.compare_exchange_weak(
+                observed,
+                candidate,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(current) => observed = current,
+            }
+        }
+    }
+}
+
+fn multdemo_visual_worker_entry(raw_arg: *mut u8) {
+    let Some(arg_ref) = (unsafe { (raw_arg as *const MultDemoVisualWorkerArg).as_ref() }) else {
+        return;
+    };
+    let arg = *arg_ref;
+    let Some(shared) = (unsafe { arg.shared.as_ref() }) else {
+        return;
+    };
+
+    loop {
+        if shared.stop.load(Ordering::Acquire) {
+            break;
+        }
+
+        shared.gate.acquire();
+        if shared.stop.load(Ordering::Acquire) {
+            shared.gate.release();
+            break;
+        }
+
+        let active = shared
+            .active_workers
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        shared.update_max_parallel(active);
+
+        {
+            let mut state = shared.state.lock();
+            if arg.slot < state.phases.len() {
+                state.phases[arg.slot] = state.phases[arg.slot].wrapping_add(arg.phase_step);
+                state.updates[arg.slot] = state.updates[arg.slot].wrapping_add(1);
+            }
+            state.shared_ticks = state.shared_ticks.wrapping_add(1);
+
+            let current_task = task::current_task_id().unwrap_or(0);
+            if state.last_task_id != Some(current_task) {
+                state.switches = state.switches.saturating_add(1);
+                state.last_task_id = Some(current_task);
+            }
+        }
+
+        shared.active_workers.fetch_sub(1, Ordering::AcqRel);
+        shared.gate.release();
+
+        if (arg.phase_step & 1) == 0 {
+            task::yield_now();
+        }
+        task::sleep_ticks(arg.sleep_ticks.max(1));
+    }
+
+    shared.completed.fetch_add(1, Ordering::AcqRel);
+}
+
+fn handle_multdemo_graphics_command() {
+    let Some((fb_width, fb_height)) = vga::framebuffer_resolution() else {
+        shell_println!("multdemo requires VBE/framebuffer mode");
+        shell_println!("tip: run `multdemo bench` for the text benchmark");
+        return;
+    };
+
+    let width = fb_width.min(i32::MAX as usize) as i32;
+    let height = fb_height.min(i32::MAX as usize) as i32;
+    if width <= 0 || height <= 0 {
+        shell_println!("multdemo: invalid framebuffer size");
+        return;
+    }
+    if width < 720 || height < 420 {
+        shell_println!("multdemo: framebuffer too small (need at least 720x420)");
+        return;
+    }
+
+    shell_println!("multdemo: graphical multitasking demo");
+    shell_println!("multdemo: q exits, d toggles debug, drag/resize windows");
+    shell_println!("multdemo: workers update clock/gears/wave in parallel");
+
+    for _ in 0..512 {
+        if input::pop_event().is_none() {
+            break;
+        }
+    }
+
+    let shared = MultDemoVisualShared::new();
+    let mut worker_args = [MultDemoVisualWorkerArg {
+        shared: core::ptr::null(),
+        slot: 0,
+        phase_step: 1,
+        sleep_ticks: 1,
+    }; MULTDEMO_WORKERS];
+    let mut worker_ids = [0u32; MULTDEMO_WORKERS];
+    let mut spawned = 0u32;
+
+    const STEPS: [u32; MULTDEMO_WORKERS] = [5, 7, 11];
+    const SLEEPS: [u32; MULTDEMO_WORKERS] = [2, 3, 1];
+    for slot in 0..MULTDEMO_WORKERS {
+        worker_args[slot] = MultDemoVisualWorkerArg {
+            shared: core::ptr::from_ref(&shared),
+            slot,
+            phase_step: STEPS[slot],
+            sleep_ticks: SLEEPS[slot],
+        };
+
+        let arg_ptr = (&mut worker_args[slot] as *mut MultDemoVisualWorkerArg).cast::<u8>();
+        match task::spawn_kernel(multdemo_visual_worker_entry, arg_ptr) {
+            Ok(id) => {
+                worker_ids[slot] = id;
+                spawned = spawned.saturating_add(1);
+                shell_println!("multdemo: visual worker {} task_id={}", slot, id);
+            }
+            Err(reason) => {
+                shell_println!(
+                    "multdemo: failed to spawn visual worker {}: {}",
+                    slot,
+                    reason
+                );
+                break;
+            }
+        }
+    }
+
+    if spawned == 0 {
+        shell_println!("multdemo: no visual workers spawned");
+        return;
+    }
+
+    let desktop = ui::Rect::new(0, 0, width, height);
+    let mut manager = ui::WindowManager::new(0x071320);
+
+    let clock_window = manager.add_window(ui::WindowSpec {
+        title: "Clock",
+        rect: ui::Rect::new(40, 46, 284, 226),
+        min_width: 190,
+        min_height: 146,
+        background: 0x0A1728,
+        accent: 0x3BA7E4,
+    });
+    let gears_window = manager.add_window(ui::WindowSpec {
+        title: "Gears",
+        rect: ui::Rect::new(300, 78, 390, 244),
+        min_width: 220,
+        min_height: 156,
+        background: 0x1A1410,
+        accent: 0xEE9A3A,
+    });
+    let scope_window = manager.add_window(ui::WindowSpec {
+        title: "Wave",
+        rect: ui::Rect::new(188, 248, 366, 210),
+        min_width: 220,
+        min_height: 140,
+        background: 0x0E1813,
+        accent: 0x4EE17C,
+    });
+
+    let Ok(clock_id) = clock_window else {
+        shell_println!("multdemo: failed to create Clock window");
+        multdemo_stop_visual_workers(&shared, spawned);
+        return;
+    };
+    let Ok(gears_id) = gears_window else {
+        shell_println!("multdemo: failed to create Gears window");
+        multdemo_stop_visual_workers(&shared, spawned);
+        return;
+    };
+    let Ok(scope_id) = scope_window else {
+        shell_println!("multdemo: failed to create Wave window");
+        multdemo_stop_visual_workers(&shared, spawned);
+        return;
+    };
+
+    let mut clock_open = Some(clock_id);
+    let mut gears_open = Some(gears_id);
+    let mut scope_open = Some(scope_id);
+    let mut debug_enabled = false;
+    let mut last_frame_tick = timer::ticks().wrapping_sub(MULTDEMO_FRAME_TICKS);
+
+    let first = shared.snapshot();
+    paint_multdemo_windows(
+        &mut manager,
+        clock_open,
+        gears_open,
+        scope_open,
+        first,
+    );
+    draw_multdemo_scene(
+        &manager,
+        desktop,
+        width,
+        height,
+        first,
+        shared.max_parallel.load(Ordering::Acquire),
+        debug_enabled,
+    );
+
+    'demo: loop {
+        let mut redraw = false;
+        let mut processed = 0usize;
+
+        for _ in 0..128 {
+            let Some(event) = input::pop_event() else {
+                break;
+            };
+            processed += 1;
+
+            match event {
+                InputEvent::KeyPress {
+                    key: KeyEvent::Char('q'),
+                }
+                | InputEvent::KeyPress {
+                    key: KeyEvent::Char('Q'),
+                } => break 'demo,
+                InputEvent::KeyPress {
+                    key: KeyEvent::Char('d'),
+                }
+                | InputEvent::KeyPress {
+                    key: KeyEvent::Char('D'),
+                } => {
+                    debug_enabled = !debug_enabled;
+                    redraw = true;
+                    continue;
+                }
+                _ => {}
+            }
+
+            let response = manager.handle_event(event, desktop);
+            if response.redraw || response.closed.is_some() {
+                redraw = true;
+            }
+            if let Some(closed) = response.closed {
+                if clock_open == Some(closed) {
+                    clock_open = None;
+                }
+                if gears_open == Some(closed) {
+                    gears_open = None;
+                }
+                if scope_open == Some(closed) {
+                    scope_open = None;
+                }
+            }
+            if debug_enabled && matches!(event, InputEvent::MouseMove { .. }) {
+                redraw = true;
+            }
+        }
+
+        if manager.window_count() == 0 {
+            break;
+        }
+
+        let now = timer::ticks();
+        if now.wrapping_sub(last_frame_tick) >= MULTDEMO_FRAME_TICKS {
+            redraw = true;
+            last_frame_tick = now;
+        }
+
+        if redraw {
+            let snapshot = shared.snapshot();
+            paint_multdemo_windows(
+                &mut manager,
+                clock_open,
+                gears_open,
+                scope_open,
+                snapshot,
+            );
+            draw_multdemo_scene(
+                &manager,
+                desktop,
+                width,
+                height,
+                snapshot,
+                shared.max_parallel.load(Ordering::Acquire),
+                debug_enabled,
+            );
+        }
+
+        if processed == 0 {
+            unsafe {
+                core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
+
+    multdemo_stop_visual_workers(&shared, spawned);
+    let summary = shared.snapshot();
+    let max_parallel = shared.max_parallel.load(Ordering::Acquire);
+    shell_println!(
+        "multdemo: visual stats updates=[{},{},{}] switches={} max_parallel={}",
+        summary.updates[0],
+        summary.updates[1],
+        summary.updates[2],
+        summary.switches,
+        max_parallel
+    );
+
+    let _ = worker_ids;
+    vga::clear_screen();
+}
+
+fn multdemo_stop_visual_workers(shared: &MultDemoVisualShared, spawned: u32) {
+    if spawned == 0 {
+        return;
+    }
+
+    shared.stop.store(true, Ordering::Release);
+    while shared.completed.load(Ordering::Acquire) < spawned {
+        task::sleep_ticks(1);
+    }
+}
+
+fn draw_multdemo_scene(
+    manager: &ui::WindowManager,
+    desktop: ui::Rect,
+    width: i32,
+    height: i32,
+    snapshot: MultDemoVisualSnapshot,
+    max_parallel: u32,
+    debug_enabled: bool,
+) {
+    vga::begin_draw_batch();
+    manager.compose(desktop);
+    draw_multdemo_overlay(width, height, snapshot, max_parallel);
+    if debug_enabled {
+        let pointer = mouse::state();
+        let snapshot = manager.debug_snapshot(pointer.x, pointer.y);
+        draw_windemo_debug_overlay(pointer.x, pointer.y, snapshot);
+    }
+    vga::end_draw_batch();
+}
+
+fn draw_multdemo_overlay(width: i32, height: i32, snapshot: MultDemoVisualSnapshot, max_parallel: u32) {
+    let panel_h = 38;
+    let panel_w = (width - 20).max(260);
+    let panel_x = 10;
+    let panel_y = height.saturating_sub(panel_h + 10);
+    let bg = 0x0E1B2D;
+    let border = 0x4A6C95;
+    let fg = 0xDFEAFF;
+
+    let _ = vga::draw_filled_rect(panel_x, panel_y, panel_w, panel_h, bg);
+    let _ = vga::draw_horizontal_line(panel_x, panel_y, panel_w, border);
+    let _ = vga::draw_horizontal_line(panel_x, panel_y + panel_h - 1, panel_w, border);
+
+    let mut line0 = [0u8; 160];
+    let mut line0_len = 0usize;
+    windemo_push_bytes(&mut line0, &mut line0_len, b"multdemo windows updates=");
+    windemo_push_u32(&mut line0, &mut line0_len, snapshot.updates[0]);
+    windemo_push_bytes(&mut line0, &mut line0_len, b"/");
+    windemo_push_u32(&mut line0, &mut line0_len, snapshot.updates[1]);
+    windemo_push_bytes(&mut line0, &mut line0_len, b"/");
+    windemo_push_u32(&mut line0, &mut line0_len, snapshot.updates[2]);
+    windemo_push_bytes(&mut line0, &mut line0_len, b"  switches=");
+    windemo_push_u32(&mut line0, &mut line0_len, snapshot.switches);
+    draw_windemo_debug_line(panel_x + 8, panel_y + 5, &line0[..line0_len], fg, bg);
+
+    let mut line1 = [0u8; 160];
+    let mut line1_len = 0usize;
+    windemo_push_bytes(&mut line1, &mut line1_len, b"shared=");
+    windemo_push_u32(&mut line1, &mut line1_len, snapshot.shared_ticks);
+    windemo_push_bytes(&mut line1, &mut line1_len, b" max_parallel=");
+    windemo_push_u32(&mut line1, &mut line1_len, max_parallel);
+    windemo_push_bytes(&mut line1, &mut line1_len, b"  q:exit d:debug");
+    draw_windemo_debug_line(panel_x + 8, panel_y + 21, &line1[..line1_len], fg, bg);
+}
+
+fn paint_multdemo_windows(
+    manager: &mut ui::WindowManager,
+    clock_id: Option<ui::WindowId>,
+    gears_id: Option<ui::WindowId>,
+    wave_id: Option<ui::WindowId>,
+    snapshot: MultDemoVisualSnapshot,
+) {
+    if let Some(id) = clock_id {
+        paint_multdemo_clock_window(manager, id, snapshot);
+    }
+    if let Some(id) = gears_id {
+        paint_multdemo_gears_window(manager, id, snapshot);
+    }
+    if let Some(id) = wave_id {
+        paint_multdemo_wave_window(manager, id, snapshot);
+    }
+}
+
+fn paint_multdemo_clock_window(
+    manager: &mut ui::WindowManager,
+    id: ui::WindowId,
+    snapshot: MultDemoVisualSnapshot,
+) {
+    let _ = manager.with_window_buffer_mut(id, |pixels, width, height| {
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        multdemo_fill_gradient_vertical(pixels, width, height, 0x102845, 0x071320);
+        let cx = (width as i32) / 2;
+        let cy = (height as i32) / 2;
+        let radius = ((width.min(height) as i32) / 2).saturating_sub(14).max(10);
+
+        multdemo_draw_filled_circle(pixels, width, height, cx, cy, radius, 0x142D4A);
+        multdemo_draw_circle_outline(pixels, width, height, cx, cy, radius, 0x7AC9FF);
+        multdemo_draw_circle_outline(
+            pixels,
+            width,
+            height,
+            cx,
+            cy,
+            radius.saturating_sub(1),
+            0xCBE9FF,
+        );
+
+        for mark in 0..12 {
+            let phase = 192u32.wrapping_add((mark as u32).saturating_mul(256 / 12));
+            let (dx, dy) = multdemo_direction(phase);
+            let inner = radius.saturating_sub(8);
+            let outer = radius.saturating_sub(2);
+            let x0 = cx.saturating_add(dx.saturating_mul(inner) / 256);
+            let y0 = cy.saturating_add(dy.saturating_mul(inner) / 256);
+            let x1 = cx.saturating_add(dx.saturating_mul(outer) / 256);
+            let y1 = cy.saturating_add(dy.saturating_mul(outer) / 256);
+            let color = if mark % 3 == 0 { 0xD6F3FF } else { 0x5EA3CF };
+            multdemo_draw_line(pixels, width, height, x0, y0, x1, y1, color);
+        }
+
+        let second_phase = snapshot.phases[0].wrapping_add(192);
+        let minute_phase = snapshot
+            .phases[0]
+            .wrapping_add(snapshot.shared_ticks >> 2)
+            .wrapping_add(192);
+        let hour_phase = snapshot
+            .phases[1]
+            .wrapping_add(snapshot.shared_ticks >> 4)
+            .wrapping_add(192);
+
+        multdemo_draw_clock_hand(
+            pixels,
+            width,
+            height,
+            cx,
+            cy,
+            radius.saturating_sub(12),
+            second_phase,
+            1,
+            0xFF7E66,
+        );
+        multdemo_draw_clock_hand(
+            pixels,
+            width,
+            height,
+            cx,
+            cy,
+            radius.saturating_sub(20),
+            minute_phase,
+            2,
+            0xFFE39B,
+        );
+        multdemo_draw_clock_hand(
+            pixels,
+            width,
+            height,
+            cx,
+            cy,
+            radius.saturating_sub(30),
+            hour_phase,
+            3,
+            0xFFFFFF,
+        );
+        multdemo_draw_filled_circle(pixels, width, height, cx, cy, 3, 0xFFFFFF);
+    });
+}
+
+fn paint_multdemo_gears_window(
+    manager: &mut ui::WindowManager,
+    id: ui::WindowId,
+    snapshot: MultDemoVisualSnapshot,
+) {
+    let _ = manager.with_window_buffer_mut(id, |pixels, width, height| {
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        multdemo_fill_gradient_vertical(pixels, width, height, 0x2A1C12, 0x120C08);
+        let w = width as i32;
+        let h = height as i32;
+        let cx_left = w / 3;
+        let cx_right = (w * 2) / 3;
+        let cy = h / 2;
+        let radius = ((width.min(height) as i32) / 4).clamp(14, 72);
+
+        multdemo_draw_gear(
+            pixels,
+            width,
+            height,
+            cx_left,
+            cy,
+            radius,
+            snapshot.phases[1],
+            0x91582A,
+            0xFFD29A,
+        );
+        multdemo_draw_gear(
+            pixels,
+            width,
+            height,
+            cx_right,
+            cy,
+            radius.saturating_sub(3),
+            256u32.wrapping_sub(snapshot.phases[1].wrapping_mul(2)),
+            0x4D6A2A,
+            0xC7F59C,
+        );
+
+        let bridge_y = cy.saturating_add(radius).saturating_add(8);
+        multdemo_fill_rect(
+            pixels,
+            width,
+            height,
+            cx_left.saturating_sub(8),
+            bridge_y,
+            cx_right.saturating_sub(cx_left).saturating_add(16),
+            6,
+            0x3A2A1C,
+        );
+        multdemo_draw_line(
+            pixels,
+            width,
+            height,
+            cx_left,
+            bridge_y + 2,
+            cx_right,
+            bridge_y + 2,
+            0x74563E,
+        );
+    });
+}
+
+fn paint_multdemo_wave_window(
+    manager: &mut ui::WindowManager,
+    id: ui::WindowId,
+    snapshot: MultDemoVisualSnapshot,
+) {
+    let _ = manager.with_window_buffer_mut(id, |pixels, width, height| {
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        multdemo_fill_gradient_vertical(pixels, width, height, 0x102419, 0x07120D);
+        let w = width as i32;
+        let h = height as i32;
+        let mid = h / 2;
+
+        for y in (8..h.saturating_sub(8)).step_by(16) {
+            multdemo_draw_line(pixels, width, height, 6, y, w.saturating_sub(7), y, 0x1B3D2A);
+        }
+        for x in (8..w.saturating_sub(8)).step_by(20) {
+            multdemo_draw_line(pixels, width, height, x, 6, x, h.saturating_sub(7), 0x123322);
+        }
+
+        let amp = (h / 3).max(8);
+        let mut prev_x = 6;
+        let mut prev_y = mid;
+        for x in 6..w.saturating_sub(6) {
+            let phase = snapshot
+                .phases[2]
+                .wrapping_add((x as u32).wrapping_mul(3))
+                .wrapping_add(snapshot.shared_ticks);
+            let offset = multdemo_wave_sample(phase, amp);
+            let y = mid.saturating_sub(offset).clamp(6, h.saturating_sub(7));
+            if x != 6 {
+                multdemo_draw_line(pixels, width, height, prev_x, prev_y, x, y, 0x80FFB4);
+            }
+            prev_x = x;
+            prev_y = y;
+        }
+
+        let total_updates = snapshot
+            .updates
+            .iter()
+            .copied()
+            .fold(0u32, |acc, value| acc.saturating_add(value))
+            .max(1);
+        let bar_colors = [0x3BA7E4, 0xEE9A3A, 0x4EE17C];
+        for slot in 0..MULTDEMO_WORKERS {
+            let y = h.saturating_sub(24).saturating_add((slot as i32) * 6);
+            let usable_w = w.saturating_sub(18).max(8);
+            let bar_w = ((usable_w as u64 * snapshot.updates[slot] as u64) / total_updates as u64) as i32;
+            multdemo_fill_rect(
+                pixels,
+                width,
+                height,
+                9,
+                y,
+                bar_w.max(4),
+                4,
+                bar_colors[slot],
+            );
+        }
+    });
+}
+
+const MULTDEMO_DIR_32: [(i16, i16); 32] = [
+    (256, 0),
+    (251, 50),
+    (236, 98),
+    (212, 142),
+    (181, 181),
+    (142, 212),
+    (98, 236),
+    (50, 251),
+    (0, 256),
+    (-50, 251),
+    (-98, 236),
+    (-142, 212),
+    (-181, 181),
+    (-212, 142),
+    (-236, 98),
+    (-251, 50),
+    (-256, 0),
+    (-251, -50),
+    (-236, -98),
+    (-212, -142),
+    (-181, -181),
+    (-142, -212),
+    (-98, -236),
+    (-50, -251),
+    (0, -256),
+    (50, -251),
+    (98, -236),
+    (142, -212),
+    (181, -181),
+    (212, -142),
+    (236, -98),
+    (251, -50),
+];
+
+fn multdemo_direction(phase: u32) -> (i32, i32) {
+    let index = ((phase >> 3) & 31) as usize;
+    let (dx, dy) = MULTDEMO_DIR_32[index];
+    (dx as i32, dy as i32)
+}
+
+fn multdemo_fill_gradient_vertical(
+    pixels: &mut [u32],
+    width: usize,
+    height: usize,
+    top: u32,
+    bottom: u32,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    let top_r = ((top >> 16) & 0xFF) as i32;
+    let top_g = ((top >> 8) & 0xFF) as i32;
+    let top_b = (top & 0xFF) as i32;
+    let bot_r = ((bottom >> 16) & 0xFF) as i32;
+    let bot_g = ((bottom >> 8) & 0xFF) as i32;
+    let bot_b = (bottom & 0xFF) as i32;
+    let denom = (height as i32 - 1).max(1);
+
+    for y in 0..height {
+        let t = y as i32;
+        let r = top_r + ((bot_r - top_r) * t) / denom;
+        let g = top_g + ((bot_g - top_g) * t) / denom;
+        let b = top_b + ((bot_b - top_b) * t) / denom;
+        let color = ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
+        let row = y * width;
+        for x in 0..width {
+            pixels[row + x] = color;
+        }
+    }
+}
+
+fn multdemo_fill_rect(
+    pixels: &mut [u32],
+    width: usize,
+    height: usize,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    color: u32,
+) {
+    if width == 0 || height == 0 || w <= 0 || h <= 0 {
+        return;
+    }
+
+    let x0 = x.max(0).min(width as i32);
+    let y0 = y.max(0).min(height as i32);
+    let x1 = x.saturating_add(w).max(0).min(width as i32);
+    let y1 = y.saturating_add(h).max(0).min(height as i32);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+
+    for row in y0 as usize..y1 as usize {
+        let base = row * width;
+        for col in x0 as usize..x1 as usize {
+            pixels[base + col] = color;
+        }
+    }
+}
+
+fn multdemo_plot(pixels: &mut [u32], width: usize, height: usize, x: i32, y: i32, color: u32) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+        return;
+    }
+
+    let idx = y as usize * width + x as usize;
+    if idx < pixels.len() {
+        pixels[idx] = color;
+    }
+}
+
+fn multdemo_draw_line(
+    pixels: &mut [u32],
+    width: usize,
+    height: usize,
+    mut x0: i32,
+    mut y0: i32,
+    x1: i32,
+    y1: i32,
+    color: u32,
+) {
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+
+    loop {
+        multdemo_plot(pixels, width, height, x0, y0, color);
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let e2 = err.saturating_mul(2);
+        if e2 >= dy {
+            err = err.saturating_add(dy);
+            x0 = x0.saturating_add(sx);
+        }
+        if e2 <= dx {
+            err = err.saturating_add(dx);
+            y0 = y0.saturating_add(sy);
+        }
+    }
+}
+
+fn multdemo_draw_hline(
+    pixels: &mut [u32],
+    width: usize,
+    height: usize,
+    y: i32,
+    x0: i32,
+    x1: i32,
+    color: u32,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    if y < 0 || y >= height as i32 {
+        return;
+    }
+
+    let left = x0.min(x1).max(0).min(width as i32 - 1);
+    let right = x0.max(x1).max(0).min(width as i32 - 1);
+    let row = y as usize * width;
+    for x in left as usize..=right as usize {
+        pixels[row + x] = color;
+    }
+}
+
+fn multdemo_draw_circle_outline(
+    pixels: &mut [u32],
+    width: usize,
+    height: usize,
+    cx: i32,
+    cy: i32,
+    radius: i32,
+    color: u32,
+) {
+    if radius <= 0 {
+        return;
+    }
+
+    let mut x = radius;
+    let mut y = 0;
+    let mut err = 1 - x;
+
+    while x >= y {
+        multdemo_plot(pixels, width, height, cx + x, cy + y, color);
+        multdemo_plot(pixels, width, height, cx + y, cy + x, color);
+        multdemo_plot(pixels, width, height, cx - y, cy + x, color);
+        multdemo_plot(pixels, width, height, cx - x, cy + y, color);
+        multdemo_plot(pixels, width, height, cx - x, cy - y, color);
+        multdemo_plot(pixels, width, height, cx - y, cy - x, color);
+        multdemo_plot(pixels, width, height, cx + y, cy - x, color);
+        multdemo_plot(pixels, width, height, cx + x, cy - y, color);
+
+        y += 1;
+        if err < 0 {
+            err += 2 * y + 1;
+        } else {
+            x -= 1;
+            err += 2 * (y - x + 1);
+        }
+    }
+}
+
+fn multdemo_draw_filled_circle(
+    pixels: &mut [u32],
+    width: usize,
+    height: usize,
+    cx: i32,
+    cy: i32,
+    radius: i32,
+    color: u32,
+) {
+    if radius <= 0 {
+        return;
+    }
+
+    let mut x = radius;
+    let mut y = 0;
+    let mut err = 1 - x;
+
+    while x >= y {
+        multdemo_draw_hline(pixels, width, height, cy + y, cx - x, cx + x, color);
+        multdemo_draw_hline(pixels, width, height, cy - y, cx - x, cx + x, color);
+        multdemo_draw_hline(pixels, width, height, cy + x, cx - y, cx + y, color);
+        multdemo_draw_hline(pixels, width, height, cy - x, cx - y, cx + y, color);
+
+        y += 1;
+        if err < 0 {
+            err += 2 * y + 1;
+        } else {
+            x -= 1;
+            err += 2 * (y - x + 1);
+        }
+    }
+}
+
+fn multdemo_draw_clock_hand(
+    pixels: &mut [u32],
+    width: usize,
+    height: usize,
+    cx: i32,
+    cy: i32,
+    length: i32,
+    phase: u32,
+    thickness: i32,
+    color: u32,
+) {
+    let (dx, dy) = multdemo_direction(phase);
+    let x1 = cx.saturating_add(dx.saturating_mul(length.max(1)) / 256);
+    let y1 = cy.saturating_add(dy.saturating_mul(length.max(1)) / 256);
+
+    let nx = dy.signum();
+    let ny = -dx.signum();
+    let half = (thickness.max(1) - 1) / 2;
+    for offset in -half..=half {
+        multdemo_draw_line(
+            pixels,
+            width,
+            height,
+            cx.saturating_add(nx.saturating_mul(offset)),
+            cy.saturating_add(ny.saturating_mul(offset)),
+            x1.saturating_add(nx.saturating_mul(offset)),
+            y1.saturating_add(ny.saturating_mul(offset)),
+            color,
+        );
+    }
+}
+
+fn multdemo_draw_gear(
+    pixels: &mut [u32],
+    width: usize,
+    height: usize,
+    cx: i32,
+    cy: i32,
+    radius: i32,
+    rotation: u32,
+    fill: u32,
+    edge: u32,
+) {
+    if radius <= 4 {
+        return;
+    }
+
+    multdemo_draw_filled_circle(pixels, width, height, cx, cy, radius, fill);
+    multdemo_draw_circle_outline(pixels, width, height, cx, cy, radius, edge);
+    multdemo_draw_circle_outline(
+        pixels,
+        width,
+        height,
+        cx,
+        cy,
+        radius.saturating_sub(2),
+        0x1A1A1A,
+    );
+
+    for tooth in 0..12 {
+        let phase = rotation.wrapping_add((tooth as u32).saturating_mul(256 / 12));
+        let (dx, dy) = multdemo_direction(phase);
+        let x0 = cx.saturating_add(dx.saturating_mul(radius.saturating_sub(2)) / 256);
+        let y0 = cy.saturating_add(dy.saturating_mul(radius.saturating_sub(2)) / 256);
+        let x1 = cx.saturating_add(dx.saturating_mul(radius.saturating_add(6)) / 256);
+        let y1 = cy.saturating_add(dy.saturating_mul(radius.saturating_add(6)) / 256);
+        multdemo_draw_line(pixels, width, height, x0, y0, x1, y1, edge);
+    }
+
+    for spoke in 0..4 {
+        let phase = rotation.wrapping_add((spoke as u32).saturating_mul(64));
+        let (dx, dy) = multdemo_direction(phase);
+        let x1 = cx.saturating_add(dx.saturating_mul(radius.saturating_sub(8)) / 256);
+        let y1 = cy.saturating_add(dy.saturating_mul(radius.saturating_sub(8)) / 256);
+        multdemo_draw_line(pixels, width, height, cx, cy, x1, y1, 0xE9DBBE);
+    }
+
+    multdemo_draw_filled_circle(
+        pixels,
+        width,
+        height,
+        cx,
+        cy,
+        (radius / 4).max(3),
+        0x111111,
+    );
+}
+
+fn multdemo_triangle_wave(phase: u32) -> i32 {
+    let value = (phase & 0xFF) as i32;
+    if value < 128 {
+        value.saturating_mul(2).saturating_sub(127)
+    } else {
+        (255 - value).saturating_mul(2).saturating_sub(127)
+    }
+}
+
+fn multdemo_wave_sample(phase: u32, amplitude: i32) -> i32 {
+    let a = multdemo_triangle_wave(phase);
+    let b = multdemo_triangle_wave(phase.wrapping_mul(3).wrapping_add(37));
+    let c = multdemo_triangle_wave(phase.wrapping_mul(5).wrapping_add(91));
+    (a.saturating_mul(amplitude)
+        + b.saturating_mul(amplitude / 2)
+        + c.saturating_mul(amplitude / 4))
+        / 127
+}
+
+#[derive(Clone, Copy)]
+struct MultDemoBenchWorkerArg {
+    shared: *const MultDemoBenchShared,
+    slot: usize,
+    iterations: u32,
+    pause_ticks: u32,
+}
+
+#[derive(Clone, Copy)]
+struct MultDemoBenchSnapshot {
+    total_ops: u32,
+    per_worker: [u32; MULTDEMO_WORKERS],
+    switches: u32,
+}
+
+struct MultDemoBenchState {
+    total_ops: u32,
+    per_worker: [u32; MULTDEMO_WORKERS],
+    switches: u32,
+    last_task_id: Option<u32>,
+}
+
+impl MultDemoBenchState {
+    const fn new() -> Self {
+        Self {
+            total_ops: 0,
+            per_worker: [0; MULTDEMO_WORKERS],
+            switches: 0,
+            last_task_id: None,
+        }
+    }
+}
+
+struct MultDemoBenchShared {
+    state: sync::Mutex<MultDemoBenchState>,
+    gate: sync::Semaphore,
+    completed: AtomicU32,
+    active_workers: AtomicU32,
+    max_parallel: AtomicU32,
+}
+
+impl MultDemoBenchShared {
+    const fn new() -> Self {
+        Self {
+            state: sync::Mutex::new(MultDemoBenchState::new()),
+            gate: sync::Semaphore::new(2),
+            completed: AtomicU32::new(0),
+            active_workers: AtomicU32::new(0),
+            max_parallel: AtomicU32::new(0),
+        }
+    }
+
+    fn snapshot(&self) -> MultDemoBenchSnapshot {
+        let state = self.state.lock();
+        MultDemoBenchSnapshot {
+            total_ops: state.total_ops,
+            per_worker: state.per_worker,
+            switches: state.switches,
+        }
+    }
+
+    fn update_max_parallel(&self, candidate: u32) {
+        let mut observed = self.max_parallel.load(Ordering::Acquire);
+        while candidate > observed {
+            match self.max_parallel.compare_exchange_weak(
+                observed,
+                candidate,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(current) => observed = current,
+            }
+        }
+    }
+}
+
+fn multdemo_bench_worker_entry(raw_arg: *mut u8) {
+    let Some(arg_ref) = (unsafe { (raw_arg as *const MultDemoBenchWorkerArg).as_ref() }) else {
+        return;
+    };
+    let arg = *arg_ref;
+    let Some(shared) = (unsafe { arg.shared.as_ref() }) else {
+        return;
+    };
+
+    let mut use_sleep = false;
+    for iteration in 0..arg.iterations {
+        shared.gate.acquire();
+
+        let active = shared
+            .active_workers
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        shared.update_max_parallel(active);
+
+        {
+            let mut state = shared.state.lock();
+            state.total_ops = state.total_ops.saturating_add(1);
+            if arg.slot < state.per_worker.len() {
+                state.per_worker[arg.slot] = state.per_worker[arg.slot].saturating_add(1);
+            }
+
+            let current_task = task::current_task_id().unwrap_or(0);
+            if state.last_task_id != Some(current_task) {
+                state.switches = state.switches.saturating_add(1);
+                state.last_task_id = Some(current_task);
+            }
+        }
+
+        if (iteration.wrapping_add(arg.slot as u32) % 6) == 0 {
+            task::yield_now();
+        }
+
+        shared.active_workers.fetch_sub(1, Ordering::AcqRel);
+        shared.gate.release();
+
+        if use_sleep {
+            task::sleep_ticks(arg.pause_ticks.max(1));
+        } else {
+            task::yield_now();
+        }
+        use_sleep = !use_sleep;
+    }
+
+    shared.completed.fetch_add(1, Ordering::AcqRel);
+}
+
+fn handle_multdemo_command<'a, I>(mut parts: I)
+where
+    I: Iterator<Item = &'a str>,
+{
+    let Some(first) = parts.next() else {
+        handle_multdemo_graphics_command();
+        return;
+    };
+
+    match first {
+        "bench" => handle_multdemo_bench_command(parts),
+        "gui" | "gfx" => {
+            if parts.next().is_some() {
+                shell_println!("usage: multdemo | multdemo bench [iterations]");
+                return;
+            }
+            handle_multdemo_graphics_command();
+        }
+        "-h" | "--help" | "help" => {
+            shell_println!("usage: multdemo");
+            shell_println!("       multdemo bench [iterations]");
+        }
+        token if parse_u32(token).is_some() => {
+            handle_multdemo_bench_command(core::iter::once(token).chain(parts));
+        }
+        _ => {
+            shell_println!("multdemo: unknown mode '{}'", first);
+            shell_println!("usage: multdemo | multdemo bench [iterations]");
+        }
+    }
+}
+
+fn handle_multdemo_bench_command<'a, I>(mut parts: I)
+where
+    I: Iterator<Item = &'a str>,
+{
+    let mut iterations = MULTDEMO_DEFAULT_ITERATIONS;
+    if let Some(token) = parts.next() {
+        let Some(parsed) = parse_u32(token) else {
+            shell_println!("multdemo bench: invalid iteration count '{}'", token);
+            shell_println!("usage: multdemo bench [iterations]");
+            return;
+        };
+        if parsed == 0 {
+            shell_println!("multdemo bench: iterations must be > 0");
+            return;
+        }
+        if parsed > MULTDEMO_MAX_ITERATIONS {
+            iterations = MULTDEMO_MAX_ITERATIONS;
+            shell_println!(
+                "multdemo bench: capping iterations from {} to {}",
+                parsed,
+                MULTDEMO_MAX_ITERATIONS
+            );
+        } else {
+            iterations = parsed;
+        }
+    }
+
+    if parts.next().is_some() {
+        shell_println!("usage: multdemo bench [iterations]");
+        return;
+    }
+
+    let shared = MultDemoBenchShared::new();
+    let mut worker_args = [MultDemoBenchWorkerArg {
+        shared: core::ptr::null(),
+        slot: 0,
+        iterations: 0,
+        pause_ticks: 1,
+    }; MULTDEMO_WORKERS];
+    let mut worker_ids = [0u32; MULTDEMO_WORKERS];
+    let mut spawned = 0u32;
+
+    shell_println!(
+        "multdemo bench: spawning {} workers, {} iterations each",
+        MULTDEMO_WORKERS,
+        iterations
+    );
+    shell_println!("multdemo bench: semaphore permits=2, mutex-protected shared counters");
+
+    for slot in 0..MULTDEMO_WORKERS {
+        worker_args[slot] = MultDemoBenchWorkerArg {
+            shared: core::ptr::from_ref(&shared),
+            slot,
+            iterations,
+            pause_ticks: (slot as u32).saturating_add(1),
+        };
+
+        let arg_ptr = (&mut worker_args[slot] as *mut MultDemoBenchWorkerArg).cast::<u8>();
+        match task::spawn_kernel(multdemo_bench_worker_entry, arg_ptr) {
+            Ok(id) => {
+                worker_ids[slot] = id;
+                spawned = spawned.saturating_add(1);
+                shell_println!("multdemo bench: worker {} task_id={}", slot, id);
+            }
+            Err(reason) => {
+                shell_println!(
+                    "multdemo bench: failed to spawn worker {}: {}",
+                    slot,
+                    reason
+                );
+                break;
+            }
+        }
+    }
+
+    if spawned == 0 {
+        shell_println!("multdemo bench: no workers spawned");
+        return;
+    }
+
+    let expected_ops = iterations.saturating_mul(spawned);
+    let start_tick = timer::ticks();
+    let mut last_report = start_tick;
+
+    loop {
+        let done = shared.completed.load(Ordering::Acquire);
+        if done >= spawned {
+            break;
+        }
+
+        let now = timer::ticks();
+        if now.wrapping_sub(last_report) >= MULTDEMO_PROGRESS_TICKS {
+            let snap = shared.snapshot();
+            shell_println!(
+                "multdemo bench: progress done={}/{} ops={}/{} switches={}",
+                done,
+                spawned,
+                snap.total_ops,
+                expected_ops,
+                snap.switches
+            );
+            last_report = now;
+        }
+
+        task::sleep_ticks(2);
+    }
+
+    let elapsed_ticks = timer::ticks().wrapping_sub(start_tick);
+    let hz = timer::frequency_hz().max(1);
+    let elapsed_ms = (elapsed_ticks as u64).saturating_mul(1000) / hz as u64;
+    let snap = shared.snapshot();
+    let max_parallel = shared.max_parallel.load(Ordering::Acquire);
+
+    shell_println!(
+        "multdemo bench: finished in {} ticks ({} ms at {} Hz)",
+        elapsed_ticks,
+        elapsed_ms,
+        hz
+    );
+    shell_println!(
+        "multdemo bench: totals ops={} expected={} switches={} max_parallel={}",
+        snap.total_ops,
+        expected_ops,
+        snap.switches,
+        max_parallel
+    );
+
+    for slot in 0..spawned as usize {
+        shell_println!(
+            "multdemo bench: worker {} (task {}) ops={}",
+            slot,
+            worker_ids[slot],
+            snap.per_worker[slot]
+        );
+    }
+
+    let per_worker_ok = (0..spawned as usize).all(|slot| snap.per_worker[slot] == iterations);
+    let pass = snap.total_ops == expected_ops && per_worker_ok && max_parallel <= 2;
+    shell_println!(
+        "multdemo bench: {}",
+        if pass {
+            "PASS"
+        } else {
+            "CHECK RESULTS ABOVE"
+        }
+    );
 }
 
 fn handle_mouse_command() {

@@ -78,8 +78,8 @@ make run
 # Build and run with serial output on stdio (headless)
 make run-serial
 
-# Release build
-make PROFILE=release run
+# Debug build override
+make PROFILE=debug run
 
 # Clean build artifacts
 make clean

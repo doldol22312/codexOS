@@ -111,7 +111,6 @@ struct FramebufferState {
     mouse_saved_y: usize,
     mouse_saved_w: usize,
     mouse_saved_h: usize,
-    mouse_saved_pixels: [u32; MOUSE_CURSOR_SAVE_WIDTH * MOUSE_CURSOR_SAVE_HEIGHT],
     draw_batch_depth: u32,
     draw_batch_dirty: Option<(usize, usize, usize, usize)>,
 }
@@ -468,6 +467,10 @@ pub fn set_mouse_cursor(x: i32, y: i32, visible: bool) {
             return;
         };
 
+        if state.mouse_cursor_x == x && state.mouse_cursor_y == y && state.mouse_cursor_visible == visible {
+            return;
+        }
+
         state.mouse_cursor_x = x;
         state.mouse_cursor_y = y;
         state.mouse_cursor_visible = visible;
@@ -512,11 +515,15 @@ pub fn end_draw_batch() {
             return;
         }
 
-        let Some((x0, y0, x1, y1)) = state.draw_batch_dirty.take() else {
+        let dirty = state.draw_batch_dirty.take();
+        if let Some((x0, y0, x1, y1)) = dirty {
+            if x0 < x1 && y0 < y1 {
+                flush_backbuffer_rect(state, x0, y0, x1 - x0, y1 - y0);
+            }
+        }
+
+        if dirty.is_none() {
             return;
-        };
-        if x0 < x1 && y0 < y1 {
-            flush_backbuffer_rect(state, x0, y0, x1 - x0, y1 - y0);
         }
     }
 }
@@ -1629,25 +1636,47 @@ unsafe fn flush_backbuffer_rect(
         return;
     }
 
-    let refresh_cursor = state.mouse_cursor_drawn
-        && rects_intersect(
-            x_start,
-            y_start,
-            x_end - x_start,
-            y_end - y_start,
-            state.mouse_saved_x,
-            state.mouse_saved_y,
-            state.mouse_saved_w,
-            state.mouse_saved_h,
-        );
-
-    if refresh_cursor {
-        restore_mouse_cursor_locked(state);
-    }
+    let cursor_rect = if state.mouse_cursor_visible {
+        clipped_cursor_rect(state, state.mouse_cursor_x, state.mouse_cursor_y)
+    } else {
+        None
+    };
 
     for y in y_start..y_end {
         let src_row = y * state.surface_width;
         let dst_row = state.front_ptr.add(y * state.pitch_bytes);
+
+        if let Some((cx, cy, cw, ch)) = cursor_rect {
+            let cx1 = cx.saturating_add(cw);
+            let cy1 = cy.saturating_add(ch);
+            if y >= cy && y < cy1 {
+                let left_end = x_end.min(cx);
+                for x in x_start..left_end {
+                    let pixel = state.back[src_row + x];
+                    let dst = dst_row.add(x * bytes_per_pixel);
+                    write_pixel(dst, state.bpp, pixel);
+                }
+
+                let mid_start = x_start.max(cx);
+                let mid_end = x_end.min(cx1);
+                for x in mid_start..mid_end {
+                    let mut pixel = state.back[src_row + x];
+                    if let Some(cursor_pixel) = mouse_cursor_color_at(state, x as i32, y as i32) {
+                        pixel = cursor_pixel;
+                    }
+                    let dst = dst_row.add(x * bytes_per_pixel);
+                    write_pixel(dst, state.bpp, pixel);
+                }
+
+                let right_start = x_start.max(cx1);
+                for x in right_start..x_end {
+                    let pixel = state.back[src_row + x];
+                    let dst = dst_row.add(x * bytes_per_pixel);
+                    write_pixel(dst, state.bpp, pixel);
+                }
+                continue;
+            }
+        }
 
         for x in x_start..x_end {
             let pixel = state.back[src_row + x];
@@ -1656,143 +1685,121 @@ unsafe fn flush_backbuffer_rect(
         }
     }
 
-    if state.mouse_cursor_visible && (refresh_cursor || !state.mouse_cursor_drawn) {
-        draw_mouse_cursor_locked(state);
+    if let Some((x, y, w, h)) = cursor_rect {
+        state.mouse_saved_x = x;
+        state.mouse_saved_y = y;
+        state.mouse_saved_w = w;
+        state.mouse_saved_h = h;
+        state.mouse_cursor_drawn = true;
+    } else {
+        state.mouse_saved_w = 0;
+        state.mouse_saved_h = 0;
+        state.mouse_cursor_drawn = false;
+    }
+}
+
+unsafe fn refresh_mouse_cursor_locked(state: &mut FramebufferState) {
+    let old_rect = if state.mouse_saved_w > 0 && state.mouse_saved_h > 0 {
+        Some((
+            state.mouse_saved_x,
+            state.mouse_saved_y,
+            state.mouse_saved_w,
+            state.mouse_saved_h,
+        ))
+    } else {
+        None
+    };
+    let new_rect = if state.mouse_cursor_visible {
+        clipped_cursor_rect(state, state.mouse_cursor_x, state.mouse_cursor_y)
+    } else {
+        None
+    };
+
+    if let Some((x, y, w, h)) = union_rect_usize(old_rect, new_rect) {
+        flush_backbuffer_rect(state, x, y, w, h);
     }
 }
 
 #[inline]
-fn rects_intersect(
-    ax: usize,
-    ay: usize,
-    aw: usize,
-    ah: usize,
-    bx: usize,
-    by: usize,
-    bw: usize,
-    bh: usize,
-) -> bool {
-    if aw == 0 || ah == 0 || bw == 0 || bh == 0 {
-        return false;
-    }
-
-    let ax1 = ax.saturating_add(aw);
-    let ay1 = ay.saturating_add(ah);
-    let bx1 = bx.saturating_add(bw);
-    let by1 = by.saturating_add(bh);
-
-    ax < bx1 && ax1 > bx && ay < by1 && ay1 > by
-}
-
-unsafe fn refresh_mouse_cursor_locked(state: &mut FramebufferState) {
-    if state.mouse_cursor_drawn {
-        restore_mouse_cursor_locked(state);
-    }
-
-    if state.mouse_cursor_visible {
-        draw_mouse_cursor_locked(state);
-    }
-}
-
-unsafe fn restore_mouse_cursor_locked(state: &mut FramebufferState) {
-    if !state.mouse_cursor_drawn || state.mouse_saved_w == 0 || state.mouse_saved_h == 0 {
-        state.mouse_cursor_drawn = false;
-        return;
-    }
-
-    let bytes_per_pixel = bytes_per_pixel_for_bpp(state.bpp);
-    for row in 0..state.mouse_saved_h {
-        let dst_row = state.front_ptr.add(
-            (state.mouse_saved_y + row) * state.pitch_bytes + state.mouse_saved_x * bytes_per_pixel,
-        );
-        let saved_row = row * MOUSE_CURSOR_SAVE_WIDTH;
-        for col in 0..state.mouse_saved_w {
-            let pixel = state.mouse_saved_pixels[saved_row + col];
-            write_pixel(dst_row.add(col * bytes_per_pixel), state.bpp, pixel);
-        }
-    }
-
-    state.mouse_cursor_drawn = false;
-    state.mouse_saved_w = 0;
-    state.mouse_saved_h = 0;
-}
-
-unsafe fn draw_mouse_cursor_locked(state: &mut FramebufferState) {
+fn clipped_cursor_rect(
+    state: &FramebufferState,
+    cursor_x: i32,
+    cursor_y: i32,
+) -> Option<(usize, usize, usize, usize)> {
     let sw = state.surface_width as i32;
     let sh = state.surface_height as i32;
     if sw <= 0 || sh <= 0 {
-        state.mouse_cursor_drawn = false;
-        return;
+        return None;
     }
 
-    let x = state.mouse_cursor_x;
-    let y = state.mouse_cursor_y;
-    let shadow_x = x.saturating_add(MOUSE_CURSOR_SHADOW_OFFSET_X as i32);
-    let shadow_y = y.saturating_add(MOUSE_CURSOR_SHADOW_OFFSET_Y as i32);
-
-    let x0 = x.min(shadow_x).max(0);
-    let y0 = y.min(shadow_y).max(0);
-    let x1 = x
-        .saturating_add(MOUSE_CURSOR_WIDTH as i32)
-        .max(shadow_x.saturating_add(MOUSE_CURSOR_WIDTH as i32))
+    let x0 = cursor_x.max(0);
+    let y0 = cursor_y.max(0);
+    let x1 = cursor_x
+        .saturating_add(MOUSE_CURSOR_SAVE_WIDTH as i32)
         .min(sw);
-    let y1 = y
-        .saturating_add(MOUSE_CURSOR_HEIGHT as i32)
-        .max(shadow_y.saturating_add(MOUSE_CURSOR_HEIGHT as i32))
+    let y1 = cursor_y
+        .saturating_add(MOUSE_CURSOR_SAVE_HEIGHT as i32)
         .min(sh);
     if x0 >= x1 || y0 >= y1 {
-        state.mouse_cursor_drawn = false;
-        return;
+        return None;
     }
 
-    let x0_usize = x0 as usize;
-    let y0_usize = y0 as usize;
-    let width = ((x1 - x0) as usize).min(MOUSE_CURSOR_SAVE_WIDTH);
-    let height = ((y1 - y0) as usize).min(MOUSE_CURSOR_SAVE_HEIGHT);
-    let bytes_per_pixel = bytes_per_pixel_for_bpp(state.bpp);
+    Some((
+        x0 as usize,
+        y0 as usize,
+        (x1 - x0) as usize,
+        (y1 - y0) as usize,
+    ))
+}
 
-    state.mouse_saved_x = x0_usize;
-    state.mouse_saved_y = y0_usize;
-    state.mouse_saved_w = width;
-    state.mouse_saved_h = height;
-
-    for row in 0..height {
-        let src_row = state
-            .front_ptr
-            .add((y0_usize + row) * state.pitch_bytes + x0_usize * bytes_per_pixel);
-        let saved_row = row * MOUSE_CURSOR_SAVE_WIDTH;
-        for col in 0..width {
-            state.mouse_saved_pixels[saved_row + col] =
-                read_pixel(src_row.add(col * bytes_per_pixel) as *const u8, state.bpp);
+#[inline]
+fn union_rect_usize(
+    a: Option<(usize, usize, usize, usize)>,
+    b: Option<(usize, usize, usize, usize)>,
+) -> Option<(usize, usize, usize, usize)> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(rect), None) | (None, Some(rect)) => Some(rect),
+        (Some((ax, ay, aw, ah)), Some((bx, by, bw, bh))) => {
+            let ax1 = ax.saturating_add(aw);
+            let ay1 = ay.saturating_add(ah);
+            let bx1 = bx.saturating_add(bw);
+            let by1 = by.saturating_add(bh);
+            let x0 = ax.min(bx);
+            let y0 = ay.min(by);
+            let x1 = ax1.max(bx1);
+            let y1 = ay1.max(by1);
+            Some((x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0)))
         }
     }
+}
 
-    for row in 0..height {
-        let dst_row = state
-            .front_ptr
-            .add((y0_usize + row) * state.pitch_bytes + x0_usize * bytes_per_pixel);
-        let py = y0 + row as i32;
-        for col in 0..width {
-            let px = x0 + col as i32;
-            let sprite_x = px - x;
-            let sprite_y = py - y;
-
-            let color = if cursor_mask_at_signed(sprite_x, sprite_y) {
-                if cursor_mask_border(sprite_x as usize, sprite_y as usize) {
-                    MOUSE_CURSOR_BORDER_COLOR
-                } else {
-                    MOUSE_CURSOR_FILL_COLOR
-                }
-            } else if cursor_mask_at_signed(px - shadow_x, py - shadow_y) {
-                MOUSE_CURSOR_SHADOW_COLOR
-            } else {
-                continue;
-            };
-            write_pixel(dst_row.add(col * bytes_per_pixel), state.bpp, color);
-        }
+#[inline]
+fn mouse_cursor_color_at(state: &FramebufferState, px: i32, py: i32) -> Option<u32> {
+    if !state.mouse_cursor_visible {
+        return None;
     }
 
-    state.mouse_cursor_drawn = true;
+    let sprite_x = px.saturating_sub(state.mouse_cursor_x);
+    let sprite_y = py.saturating_sub(state.mouse_cursor_y);
+    if cursor_mask_at_signed(sprite_x, sprite_y) {
+        if cursor_mask_border(sprite_x as usize, sprite_y as usize) {
+            return Some(MOUSE_CURSOR_BORDER_COLOR);
+        }
+        return Some(MOUSE_CURSOR_FILL_COLOR);
+    }
+
+    let shadow_x = state
+        .mouse_cursor_x
+        .saturating_add(MOUSE_CURSOR_SHADOW_OFFSET_X as i32);
+    let shadow_y = state
+        .mouse_cursor_y
+        .saturating_add(MOUSE_CURSOR_SHADOW_OFFSET_Y as i32);
+    if cursor_mask_at_signed(px.saturating_sub(shadow_x), py.saturating_sub(shadow_y)) {
+        return Some(MOUSE_CURSOR_SHADOW_COLOR);
+    }
+
+    None
 }
 
 #[inline]
@@ -1861,35 +1868,6 @@ unsafe fn write_pixel(dst: *mut u8, bpp: usize, rgb: u32) {
 }
 
 #[inline]
-unsafe fn read_pixel(src: *const u8, bpp: usize) -> u32 {
-    match bpp {
-        0..=15 => {
-            let value = (src as *const u16).read_volatile();
-            let r = ((value >> 10) & 0x1F) as u32;
-            let g = ((value >> 5) & 0x1F) as u32;
-            let b = (value & 0x1F) as u32;
-            ((r * 255 / 31) << 16) | ((g * 255 / 31) << 8) | (b * 255 / 31)
-        }
-        16..=23 => {
-            let value = (src as *const u16).read_volatile();
-            let r = ((value >> 11) & 0x1F) as u32;
-            let g = ((value >> 5) & 0x3F) as u32;
-            let b = (value & 0x1F) as u32;
-            ((r * 255 / 31) << 16) | ((g * 255 / 63) << 8) | (b * 255 / 31)
-        }
-        24..=31 => {
-            let b = src.read_volatile() as u32;
-            let g = src.add(1).read_volatile() as u32;
-            let r = src.add(2).read_volatile() as u32;
-            (r << 16) | (g << 8) | b
-        }
-        _ => {
-            let value = (src as *const u32).read_volatile();
-            value & 0x00FF_FFFF
-        }
-    }
-}
-
 unsafe fn install_console(cols: usize, rows: usize) -> bool {
     let cols = cols.clamp(1, MAX_COLS);
     let rows = rows.clamp(MIN_ROWS, MAX_ROWS);
@@ -2008,7 +1986,6 @@ fn try_init_framebuffer() -> Option<(FramebufferState, usize, usize)> {
             mouse_saved_y: 0,
             mouse_saved_w: 0,
             mouse_saved_h: 0,
-            mouse_saved_pixels: [0; MOUSE_CURSOR_SAVE_WIDTH * MOUSE_CURSOR_SAVE_HEIGHT],
             draw_batch_depth: 0,
             draw_batch_dirty: None,
         },

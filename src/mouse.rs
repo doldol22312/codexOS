@@ -43,7 +43,6 @@ pub fn init() {
         BUTTONS = 0;
         PACKET_INDEX = 0;
     }
-
     let state = state();
     vga::set_mouse_cursor(state.x, state.y, true);
 }
@@ -84,20 +83,19 @@ pub fn handle_interrupt() {
         MOUSE_Y = new_y;
         BUTTONS = new_buttons;
 
-        let moved_dx = new_x - old_x;
-        let moved_dy = new_y - old_y;
-        if moved_dx != 0 || moved_dy != 0 {
+        let raw_dx = dx;
+        let raw_dy = -dy;
+        if raw_dx != 0 || raw_dy != 0 {
             input::push_event(InputEvent::MouseMove {
                 x: new_x,
                 y: new_y,
-                dx: moved_dx,
-                dy: moved_dy,
+                dx: raw_dx,
+                dy: raw_dy,
             });
         }
 
         emit_button_events(old_buttons, new_buttons, new_x, new_y);
     }
-
     let state = state();
     vga::set_mouse_cursor(state.x, state.y, true);
 }

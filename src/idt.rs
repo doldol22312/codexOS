@@ -94,6 +94,7 @@ pub fn init() {
         IDT[45] = IdtEntry::new(interrupts::isr45);
         IDT[46] = IdtEntry::new(interrupts::isr46);
         IDT[47] = IdtEntry::new(interrupts::isr47);
+        IDT[128] = IdtEntry::new(interrupts::isr128);
 
         let idt_descriptor = IdtDescriptor {
             limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,

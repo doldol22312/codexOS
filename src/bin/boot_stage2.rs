@@ -18,11 +18,11 @@ _start:
     mov sp, 0x7a00
     mov [boot_drive], dl
 
-    mov ax, 0x1000
+    mov ax, 0x0900
     mov es, ax
     xor bx, bx
     mov si, 33
-    mov cx, 1100
+    mov cx, 1200
 
 load_kernel:
     cmp cx, 0
@@ -265,9 +265,9 @@ protected_mode_entry:
     mov esp, 0x0009FC00
 
     cld
-    mov esi, 0x00010000
+    mov esi, 0x00009000
     mov edi, 0x00100000
-    mov ecx, (1100 * 512) / 4
+    mov ecx, (1200 * 512) / 4
     rep movsd
 
     mov eax, 0x00100000

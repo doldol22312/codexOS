@@ -186,7 +186,9 @@ impl WidgetResponse {
 
 mod widgets;
 mod dispatcher;
+mod window;
 
 #[allow(unused_imports)]
 pub use dispatcher::{DispatchBatch, EventDispatcher};
 pub use widgets::*;
+pub use window::*;

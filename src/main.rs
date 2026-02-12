@@ -22,6 +22,8 @@ mod rtc;
 mod serial;
 mod shell;
 mod shutdown;
+mod sync;
+mod task;
 mod timer;
 mod ui;
 pub mod vga;
@@ -100,6 +102,14 @@ pub extern "C" fn kernel_main() -> ! {
     serial_println!("boot: keyboard ready");
     mouse::init();
     serial_println!("boot: mouse ready");
+    match task::init() {
+        Ok(()) => {
+            serial_println!("boot: scheduler ready");
+        }
+        Err(reason) => {
+            serial_println!("boot: scheduler disabled ({})", reason);
+        }
+    }
 
     unsafe {
         core::arch::asm!("sti", options(nomem, nostack));
