@@ -1,27 +1,38 @@
 # codexOS
 
-A bare-metal operating system written from scratch in Rust for x86 (32-bit). Boots from a custom two-stage bootloader, runs an interactive shell, and includes drivers for keyboard, mouse, display, disk, and a custom on-disk filesystem -- all with zero external dependencies.
+A bare-metal operating system written from scratch in Rust for x86 (32-bit). Boots from a custom two-stage bootloader, runs a preemptive multitasking kernel with a windowed desktop environment, and includes drivers for keyboard, mouse, display, disk, and a custom on-disk filesystem -- all with zero external dependencies.
+
+~14,000 lines of Rust. No libc, no libunwind, no runtime.
 
 ## Features
 
+### Boot & Core
 - **Custom two-stage bootloader** -- 512-byte MBR stage 1 reads a build-generated metadata sector, loads stage 2 by metadata, then stage 2 streams kernel sectors through a 0x9000 bounce buffer directly to high memory (1 MB+) before entering 32-bit protected mode
-- **Memory management** -- 4 KiB paging with identity mapping (256 MB) plus framebuffer virtual mapping, and a free-list heap allocator with block coalescing
-- **Interrupt-driven I/O** -- full IDT/GDT/PIC setup with handlers for CPU exceptions and hardware IRQs
-- **Unified input system** -- single ring-buffer event queue for keyboard + mouse (`KeyPress`, `KeyRelease`, `MouseMove`, `MouseDown`, `MouseUp`, `MouseClick`) with simple hit-testing helpers
-- **UI/event layer** -- central event dispatcher with hit-region routing, focus tracking, framebuffer widgets (`Panel`, `Label`, `Button`, `TextBox`, `TextArea`, `Checkbox`, `RadioButton`, `Dropdown`, `ComboBox`, `Scrollbar`, `ListView`, `TreeView`, `ProgressBar`, `PopupMenu`), and a window compositor with drag/resize/minimize/maximize
-- **PS/2 keyboard driver** -- scancode translation, shift/caps lock, arrow/page keys, and key press/release event generation
-- **PS/2 mouse driver** -- 3-byte packet parsing, absolute position tracking, button events, and a hardware-independent framebuffer cursor sprite with clipped redraw-safe save/restore
-- **Framebuffer text console** -- dynamic text grid from VBE mode, bitmap glyph rendering to double buffer, dirty-rect flush optimization, batched redraw support, and blinking shell cursor (with VGA fallback)
-- **Graphical multdemo** -- multi-window multitasking demo (`multdemo`) with parallel worker tasks (clock/gears/wave), interactive compositor controls, and a `multdemo bench` mode for scheduler/semaphore stress
-- **Cursor/compositor stability** -- stabilized cursor and window composition behavior with clipped cursor updates and redraw-safe composition paths during drag/resize and focus changes
+- **Memory management** -- 4 KiB paging with identity mapping (256 MB) plus framebuffer virtual mapping, and a free-list heap allocator with block coalescing (8 MB heap)
+- **Interrupt-driven I/O** -- full IDT/GDT/PIC setup with handlers for all 32 CPU exceptions and hardware IRQs (0--47)
+- **Preemptive multitasking** -- timer-driven round-robin scheduler with up to 16 tasks, 64 KB stacks, task states (ready/running/sleeping/exited), and syscalls for `yield` and `sleep`
+- **Synchronization primitives** -- spinlock-based `Mutex` with RAII guards and counting `Semaphore` with atomic permits
+
+### Drivers
+- **PS/2 keyboard** -- scancode translation (including extended 0xE0 prefix), shift/caps lock state, arrow/page keys, and key press/release event generation
+- **PS/2 mouse** -- 3-byte packet parsing, absolute position tracking, button events, and a framebuffer cursor sprite with clipped redraw-safe save/restore
+- **ATA PIO disk** -- 28-bit LBA read/write on the primary master drive with IDENTIFY, timeout, and error recovery
 - **Serial port** -- COM1 UART output for debug logging
-- **ATA PIO disk driver** -- 28-bit LBA read/write on the primary master drive
-- **Custom filesystem (CFS1)** -- superblock + directory table + file storage with create, read, write, delete, list, and format operations
-- **PIT timer** -- configurable frequency (default 100 Hz) with uptime tracking
-- **CMOS RTC** -- date and time reads with BCD/binary format handling
-- **Interactive shell** -- 32 built-in commands, command history, tab completion, line editing, and an in-shell text editor
-- **Desktop shell demo** -- start menu/launcher, app registry, taskbar with open windows + clock, and desktop background layering behind compositor windows
-- **Matrix screensaver** -- because every OS needs one (press any key to exit)
+- **PIT timer** -- configurable frequency (default 100 Hz) with tick counting and uptime tracking
+- **CMOS RTC** -- date and time reads with BCD/binary format handling and mid-update avoidance
+
+### Graphics & UI
+- **Framebuffer text console** -- dynamic text grid from VBE mode, bitmap glyph rendering to double buffer, dirty-rect flush optimization, batched redraw support, and blinking shell cursor (with VGA text-mode fallback)
+- **Unified input system** -- single 512-slot ring-buffer event queue for keyboard + mouse (`KeyPress`, `KeyRelease`, `MouseMove`, `MouseDown`, `MouseUp`, `MouseClick`) with hit-region testing and focus tracking
+- **Widget toolkit** -- 14 framebuffer widgets: `Panel`, `Label`, `Button`, `TextBox`, `TextArea`, `Checkbox`, `RadioButton`, `Dropdown`, `ComboBox`, `Scrollbar`, `ListView`, `TreeView`, `ProgressBar`, `PopupMenu`
+- **Window compositor** -- up to 16 windows with drag, resize, minimize, maximize, z-ordering, title bars, close buttons, and redraw-safe composition paths
+
+### Shell & Desktop
+- **Interactive shell** -- 32 built-in commands, command history (32 entries), tab completion for commands and filenames, cursor-based line editing, and an in-shell text editor
+- **Desktop environment** -- start menu launcher, app registry, taskbar with open-window buttons and clock, and desktop background layering behind compositor windows
+- **Desktop apps** -- functional Terminal (shell session), File Browser (CFS1 directory listing), System Monitor (heap/uptime/task metrics), Notes (text editor), and Pixel Paint (color palette + canvas)
+- **Custom filesystem (CFS1)** -- superblock + directory table + file storage with create, read, write, delete, list, and format operations (16 MB data disk, up to 256 files)
+- **Demos** -- graphical multitasking demo (`multdemo`) with parallel worker tasks and benchmark mode, graphics primitives demo, widget showcases, window compositor demo, and Matrix screensaver
 
 ## Shell Commands
 
@@ -61,6 +72,20 @@ A bare-metal operating system written from scratch in Rust for x86 (32-bit). Boo
 | `panic` | Trigger a kernel panic (for testing) |
 
 Shell input supports command history (`Up`/`Down`), cursor movement (`Left`/`Right`), tab completion for commands and filenames, and output scrolling with `PageUp`/`PageDown`.
+
+## Desktop Environment
+
+The `desktop` command launches a windowed desktop environment with a taskbar, start-menu launcher, and five built-in applications:
+
+| App | Description |
+|---|---|
+| **Terminal** | Shell session with command input, history, and output scrollback |
+| **Files** | CFS1 file browser with directory listing and file details |
+| **Monitor** | Live system metrics -- heap usage, uptime, task count, tick rate |
+| **Notes** | Multi-line text editor with cursor navigation and word wrap |
+| **Paint** | Pixel canvas with 8-color palette, brush tool, and clear button |
+
+Each app runs in its own compositor window with drag, resize, minimize, and close support. The taskbar shows buttons for open windows and a real-time clock.
 
 ## Building
 
@@ -115,11 +140,17 @@ codexOS/
 │   ├── reboot.rs          System reboot
 │   ├── rtc.rs             CMOS real-time clock
 │   ├── serial.rs          COM1 UART driver
-│   ├── shell.rs           Interactive command shell
+│   ├── shell.rs           Interactive command shell + desktop apps
 │   ├── shutdown.rs        ACPI/APM power off
+│   ├── sync.rs            Mutex and Semaphore primitives
+│   ├── task.rs            Preemptive task scheduler (round-robin)
 │   ├── timer.rs           PIT timer (IRQ0)
-│   ├── ui.rs              UI dispatcher + framebuffer widget toolkit
 │   ├── vga.rs             Bitmap-font framebuffer text console
+│   ├── ui/
+│   │   ├── mod.rs         UI module re-exports and shared types
+│   │   ├── dispatcher.rs  Event dispatcher with hit-region routing
+│   │   ├── widgets.rs     14 framebuffer widget types
+│   │   └── window.rs      Window compositor (drag/resize/z-order)
 │   └── bin/
 │       ├── boot_stage1.rs MBR bootloader (512 bytes)
 │       └── boot_stage2.rs Stage 2: VBE mode set, A20, protected mode, kernel load
