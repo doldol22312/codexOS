@@ -4,7 +4,7 @@ A bare-metal operating system written from scratch in Rust for x86 (32-bit). Boo
 
 ## Features
 
-- **Custom two-stage bootloader** -- 512-byte MBR stage 1 loads a stage 2 that sets VBE graphics mode, captures an 8x16 BIOS bitmap font, enables A20, enters 32-bit protected mode, and jumps to the kernel at 1 MB
+- **Custom two-stage bootloader** -- 512-byte MBR stage 1 reads a build-generated metadata sector, loads stage 2 by metadata, then stage 2 streams kernel sectors through a 0x9000 bounce buffer directly to high memory (1 MB+) before entering 32-bit protected mode
 - **Memory management** -- 4 KiB paging with identity mapping (256 MB) plus framebuffer virtual mapping, and a free-list heap allocator with block coalescing
 - **Interrupt-driven I/O** -- full IDT/GDT/PIC setup with handlers for CPU exceptions and hardware IRQs
 - **Unified input system** -- single ring-buffer event queue for keyboard + mouse (`KeyPress`, `KeyRelease`, `MouseMove`, `MouseDown`, `MouseUp`, `MouseClick`) with simple hit-testing helpers
@@ -145,8 +145,20 @@ codexOS/
 | Sectors | Contents |
 |---|---|
 | 0 | Stage 1 bootloader |
-| 1--32 | Stage 2 bootloader |
-| 33--1132 | Kernel binary (up to 1100 sectors) |
+| 1 | Boot metadata (`stage2_lba`, `stage2_sectors`, `kernel_lba`, `kernel_sectors`, `kernel_bytes`) |
+| 2.. | Stage 2 bootloader (size-derived) |
+| after stage 2 | Kernel binary (size-derived) |
+
+Boot metadata sector format (`CDX1`, little-endian):
+
+| Offset | Size | Field |
+|---|---|---|
+| 0x00 | 4 | Magic (`CDX1`) |
+| 0x04 | 2 | `stage2_lba` |
+| 0x06 | 2 | `stage2_sectors` |
+| 0x08 | 2 | `kernel_lba` |
+| 0x0A | 2 | `kernel_sectors` |
+| 0x0C | 4 | `kernel_bytes` |
 
 **Data disk** (`data.img`, 16 MB):
 

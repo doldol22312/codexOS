@@ -10,6 +10,14 @@ global_asm!(
     .code16
     .global _start
 
+    .equ BOOT_META_ADDR, 0x7E00
+    .equ BOOT_META_KERNEL_LBA_OFF, 8
+    .equ BOOT_META_KERNEL_SECTORS_OFF, 10
+    .equ BOUNCE_SEG, 0x0900
+    .equ BOUNCE_OFF, 0x0000
+    .equ BOUNCE_ADDR, 0x00009000
+    .equ KERNEL_LOAD_ADDR, 0x00100000
+
 _start:
     cli
     xor ax, ax
@@ -18,17 +26,40 @@ _start:
     mov sp, 0x7a00
     mov [boot_drive], dl
 
-    mov ax, 0x0900
+    cmp word ptr [BOOT_META_ADDR], 0x4443
+    jne boot_fail
+    cmp word ptr [BOOT_META_ADDR + 2], 0x3158
+    jne boot_fail
+    mov cx, word ptr [BOOT_META_ADDR + BOOT_META_KERNEL_SECTORS_OFF]
+    cmp cx, 0
+    je boot_fail
+
+    call init_boot_video_info
+    call cache_font_8x16
+    call set_vbe_mode
+    call enable_a20
+    call enable_unreal_fs
+
+after_unreal_mode:
+    xor ax, ax
+    mov ds, ax
+
+    mov dword ptr [kernel_dst_ptr], KERNEL_LOAD_ADDR
+
+    mov ax, BOUNCE_SEG
     mov es, ax
-    xor bx, bx
-    mov si, 33
-    mov cx, 1200
+    mov bx, BOUNCE_OFF
+    mov si, word ptr [BOOT_META_ADDR + BOOT_META_KERNEL_LBA_OFF]
+    mov cx, word ptr [BOOT_META_ADDR + BOOT_META_KERNEL_SECTORS_OFF]
 
 load_kernel:
     cmp cx, 0
     je kernel_loaded
 
 read_kernel_retry:
+    xor ax, ax
+    mov ds, ax
+
     push cx
     push si
     push bx
@@ -52,28 +83,40 @@ read_kernel_retry:
     jmp read_kernel_retry
 
 read_kernel_ok:
+    xor ax, ax
+    mov ds, ax
+
     pop es
     pop bx
     pop si
     pop cx
 
-    add bx, 512
-    jnc no_segment_bump
-    mov ax, es
-    add ax, 0x1000
-    mov es, ax
+    call enable_unreal_fs
+    xor ax, ax
+    mov ds, ax
 
-no_segment_bump:
+    push cx
+    push si
+    mov esi, BOUNCE_ADDR
+    mov edi, dword ptr [kernel_dst_ptr]
+    mov ecx, 128
+
+copy_sector_to_kernel:
+    mov eax, dword ptr [esi]
+    mov dword ptr fs:[edi], eax
+    add esi, 4
+    add edi, 4
+    dec ecx
+    jnz copy_sector_to_kernel
+
+    pop si
+    pop cx
+    mov dword ptr [kernel_dst_ptr], edi
     inc si
     dec cx
     jmp load_kernel
 
 kernel_loaded:
-    call init_boot_video_info
-    call cache_font_8x16
-    call set_vbe_mode
-    call enable_a20
-
     lgdt [gdt_descriptor]
 
     mov eax, cr0
@@ -105,12 +148,33 @@ lba_to_chs:
     and al, 0xC0
     or cl, al
     ret
-
 enable_a20:
     in al, 0x92
     or al, 0x02
     and al, 0xFE
     out 0x92, al
+    ret
+
+enable_unreal_fs:
+    lgdt [gdt_descriptor]
+    mov eax, cr0
+    or eax, 0x00000001
+    mov cr0, eax
+    .byte 0x66, 0xEA
+    .long unreal_mode_pm
+    .word 0x0018
+
+unreal_mode_pm:
+    mov ax, 0x10
+    mov fs, ax
+    mov eax, cr0
+    and eax, 0xFFFFFFFE
+    mov cr0, eax
+    .byte 0xEA
+    .word unreal_mode_rm
+    .word 0x0000
+
+unreal_mode_rm:
     ret
 
 init_boot_video_info:
@@ -245,6 +309,7 @@ gdt:
     .quad 0x0000000000000000
     .quad 0x00CF9A000000FFFF
     .quad 0x00CF92000000FFFF
+    .quad 0x00009A000000FFFF
 gdt_end:
 
 gdt_descriptor:
@@ -253,6 +318,13 @@ gdt_descriptor:
 
 boot_drive:
     .byte 0
+kernel_dst_ptr:
+    .long 0
+
+boot_fail:
+    cli
+    hlt
+    jmp boot_fail
 
     .code32
 protected_mode_entry:
@@ -263,12 +335,6 @@ protected_mode_entry:
     mov gs, ax
     mov ss, ax
     mov esp, 0x0009FC00
-
-    cld
-    mov esi, 0x00009000
-    mov edi, 0x00100000
-    mov ecx, (1200 * 512) / 4
-    rep movsd
 
     mov eax, 0x00100000
     jmp eax

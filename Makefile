@@ -7,6 +7,8 @@ BUILD_DIR := build
 BUILD_STAMP := $(BUILD_DIR)/.dir
 IMG_PATH := $(BUILD_DIR)/codexos.img
 DATA_IMG_PATH := $(BUILD_DIR)/data.img
+BOOT_META_BIN := $(BUILD_DIR)/boot_meta.bin
+BOOT_LAYOUT := $(BUILD_DIR)/boot_layout.env
 
 KERNEL_ELF := target/$(TARGET_TRIPLE)/$(PROFILE)/codex_os
 STAGE1_ELF := target/$(TARGET_TRIPLE)/$(PROFILE)/boot_stage1
@@ -18,9 +20,8 @@ STAGE2_BIN := $(BUILD_DIR)/boot_stage2.bin
 
 FLOPPY_SECTORS := 2880
 DATA_DISK_SECTORS := 32768
-STAGE2_SECTORS := 32
-KERNEL_SECTORS := 1200
-KERNEL_LBA := 33
+BOOT_META_LBA := 1
+STAGE2_LBA := 2
 
 CARGO_FLAGS := -Zjson-target-spec -Zbuild-std=core,alloc,compiler_builtins -Zbuild-std-features=compiler-builtins-mem --target $(TARGET_JSON)
 
@@ -57,17 +58,36 @@ $(STAGE1_BIN): stage1 | $(BUILD_STAMP)
 
 $(STAGE2_BIN): stage2 | $(BUILD_STAMP)
 	objcopy -O binary $(STAGE2_ELF) $(STAGE2_BIN)
-	@if [ $$(stat -c%s $(STAGE2_BIN)) -gt $$(( $(STAGE2_SECTORS) * 512 )) ]; then \
-		echo "boot_stage2 is too large (max $(STAGE2_SECTORS) sectors)"; \
-		exit 1; \
-	fi
 
 $(KERNEL_BIN): kernel | $(BUILD_STAMP)
 	objcopy -O binary $(KERNEL_ELF) $(KERNEL_BIN)
-	@if [ $$(stat -c%s $(KERNEL_BIN)) -gt $$(( $(KERNEL_SECTORS) * 512 )) ]; then \
-		echo "kernel.bin is too large (max $(KERNEL_SECTORS) sectors)"; \
+
+$(BOOT_LAYOUT): $(STAGE2_BIN) $(KERNEL_BIN) | $(BUILD_STAMP)
+	@stage2_bytes=$$(stat -c%s $(STAGE2_BIN)); \
+	kernel_bytes=$$(stat -c%s $(KERNEL_BIN)); \
+	stage2_sectors=$$(( (stage2_bytes + 511) / 512 )); \
+	kernel_sectors=$$(( (kernel_bytes + 511) / 512 )); \
+	kernel_lba=$$(( $(STAGE2_LBA) + stage2_sectors )); \
+	end_lba=$$(( kernel_lba + kernel_sectors )); \
+	if [ $$stage2_sectors -eq 0 ]; then \
+		echo "boot_stage2 produced an empty binary"; \
 		exit 1; \
-	fi
+	fi; \
+	if [ $$kernel_sectors -eq 0 ]; then \
+		echo "kernel produced an empty binary"; \
+		exit 1; \
+	fi; \
+	if [ $$end_lba -gt $(FLOPPY_SECTORS) ]; then \
+		echo "kernel image too large for floppy layout (end sector $$end_lba, max $(FLOPPY_SECTORS))"; \
+		exit 1; \
+	fi; \
+	printf 'STAGE2_LBA=%s\nSTAGE2_SECTORS=%s\nKERNEL_LBA=%s\nKERNEL_SECTORS=%s\nKERNEL_BYTES=%s\n' \
+		$(STAGE2_LBA) $$stage2_sectors $$kernel_lba $$kernel_sectors $$kernel_bytes > $(BOOT_LAYOUT)
+
+$(BOOT_META_BIN): $(BOOT_LAYOUT) | $(BUILD_STAMP)
+	@. $(BOOT_LAYOUT); \
+	perl -e 'print "CDX1"; print pack("vvvvV", @ARGV); print "\0" x (512 - 16);' \
+		$$STAGE2_LBA $$STAGE2_SECTORS $$KERNEL_LBA $$KERNEL_SECTORS $$KERNEL_BYTES > $(BOOT_META_BIN)
 
 data-image: | $(BUILD_STAMP)
 	@if [ ! -f $(DATA_IMG_PATH) ]; then \
@@ -75,12 +95,14 @@ data-image: | $(BUILD_STAMP)
 		echo "Created data disk image: $(DATA_IMG_PATH)"; \
 	fi
 
-image: $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) data-image | $(BUILD_STAMP)
-	dd if=/dev/zero of=$(IMG_PATH) bs=512 count=$(FLOPPY_SECTORS) status=none
-	dd if=$(STAGE1_BIN) of=$(IMG_PATH) bs=512 seek=0 conv=notrunc status=none
-	dd if=$(STAGE2_BIN) of=$(IMG_PATH) bs=512 seek=1 conv=notrunc status=none
-	dd if=$(KERNEL_BIN) of=$(IMG_PATH) bs=512 seek=$(KERNEL_LBA) conv=notrunc status=none
-	@echo "Built boot image: $(IMG_PATH)"
+image: $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(BOOT_META_BIN) data-image | $(BUILD_STAMP)
+	@. $(BOOT_LAYOUT); \
+	dd if=/dev/zero of=$(IMG_PATH) bs=512 count=$(FLOPPY_SECTORS) status=none; \
+	dd if=$(STAGE1_BIN) of=$(IMG_PATH) bs=512 seek=0 conv=notrunc status=none; \
+	dd if=$(BOOT_META_BIN) of=$(IMG_PATH) bs=512 seek=$(BOOT_META_LBA) conv=notrunc status=none; \
+	dd if=$(STAGE2_BIN) of=$(IMG_PATH) bs=512 seek=$$STAGE2_LBA conv=notrunc status=none; \
+	dd if=$(KERNEL_BIN) of=$(IMG_PATH) bs=512 seek=$$KERNEL_LBA conv=notrunc status=none; \
+	echo "Built boot image: $(IMG_PATH) (stage2 $$STAGE2_SECTORS sectors, kernel $$KERNEL_SECTORS sectors)"
 
 run: image
 	$(QEMU) -drive format=raw,file=$(IMG_PATH),if=floppy -drive format=raw,file=$(DATA_IMG_PATH),if=ide,index=0,media=disk -boot a -m 128M
