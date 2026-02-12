@@ -12,3 +12,7 @@ qemu-reset.log
 # Editor/OS noise
 .DS_Store
 Thumbs.db
+
+# Python cache artifacts
+__pycache__/
+*.pyc
