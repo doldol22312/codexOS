@@ -437,6 +437,19 @@ pub fn handle_syscall(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     })
 }
 
+pub fn handle_user_exception(frame: *mut InterruptFrame) -> Option<*mut InterruptFrame> {
+    if !SCHEDULER_ONLINE.load(Ordering::Acquire) {
+        return None;
+    }
+
+    Some(with_interrupts_disabled(|| unsafe {
+        let scheduler_slot = &mut *SCHEDULER.0.get();
+        let scheduler = scheduler_slot.as_mut()?;
+        scheduler.mark_current_exited();
+        Some(scheduler.schedule(frame, ScheduleCause::Yield))
+    })?)
+}
+
 pub fn yield_now() {
     if !SCHEDULER_ONLINE.load(Ordering::Acquire) {
         return;
@@ -637,8 +650,7 @@ fn syscall_write(ptr: usize, len: usize, from_user: bool) -> Result<usize, u32> 
     }
 
     if from_user {
-        let end = ptr.checked_add(len).ok_or(syscall::ERR_INVALID)?;
-        if ptr < paging::USER_SPACE_BASE || end > paging::USER_SPACE_LIMIT {
+        if !paging::is_user_accessible_range(ptr, len) {
             return Err(syscall::ERR_INVALID);
         }
     }
@@ -648,9 +660,9 @@ fn syscall_write(ptr: usize, len: usize, from_user: bool) -> Result<usize, u32> 
 
     while copied < len {
         let chunk = (len - copied).min(scratch.len());
-        for index in 0..chunk {
-            let src = (ptr + copied + index) as *const u8;
-            scratch[index] = unsafe { src.read() };
+        unsafe {
+            let src = (ptr + copied) as *const u8;
+            core::ptr::copy_nonoverlapping(src, scratch.as_mut_ptr(), chunk);
         }
 
         if let Ok(text) = core::str::from_utf8(&scratch[..chunk]) {

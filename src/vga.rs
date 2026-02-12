@@ -1,6 +1,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 use core::fmt::{self, Write};
 
 use crate::io::outb;
@@ -115,15 +116,49 @@ struct FramebufferState {
     draw_batch_dirty: Option<(usize, usize, usize, usize)>,
 }
 
+struct SharedState<T>(UnsafeCell<T>);
+
+unsafe impl<T> Sync for SharedState<T> {}
+
 static mut INITIALIZED: bool = false;
-static mut CONSOLE: Option<ConsoleState> = None;
-static mut FRAMEBUFFER: Option<FramebufferState> = None;
+static CONSOLE: SharedState<Option<ConsoleState>> = SharedState(UnsafeCell::new(None));
+static FRAMEBUFFER: SharedState<Option<FramebufferState>> = SharedState(UnsafeCell::new(None));
 
 static mut CURSOR_ROW: usize = 0;
 static mut CURSOR_COL: usize = 0;
 static mut CURRENT_COLOR: u8 = DEFAULT_COLOR;
 static mut CURSOR_BLINK_VISIBLE: bool = true;
 static mut CURSOR_BLINK_LAST_TICK: u32 = 0;
+
+#[inline]
+unsafe fn console_ref() -> Option<&'static ConsoleState> {
+    (&*CONSOLE.0.get()).as_ref()
+}
+
+#[inline]
+unsafe fn console_mut() -> Option<&'static mut ConsoleState> {
+    (&mut *CONSOLE.0.get()).as_mut()
+}
+
+#[inline]
+unsafe fn console_slot() -> &'static mut Option<ConsoleState> {
+    &mut *CONSOLE.0.get()
+}
+
+#[inline]
+unsafe fn framebuffer_ref() -> Option<&'static FramebufferState> {
+    (&*FRAMEBUFFER.0.get()).as_ref()
+}
+
+#[inline]
+unsafe fn framebuffer_mut() -> Option<&'static mut FramebufferState> {
+    (&mut *FRAMEBUFFER.0.get()).as_mut()
+}
+
+#[inline]
+unsafe fn framebuffer_slot() -> &'static mut Option<FramebufferState> {
+    &mut *FRAMEBUFFER.0.get()
+}
 
 pub fn init() {
     unsafe {
@@ -135,14 +170,14 @@ pub fn init() {
         let mut target_rows = DEFAULT_ROWS;
 
         if let Some((framebuffer, cols, rows)) = try_init_framebuffer() {
-            FRAMEBUFFER = Some(framebuffer);
+            *framebuffer_slot() = Some(framebuffer);
             target_cols = cols;
             target_rows = rows;
         }
 
         if !install_console(target_cols, target_rows) {
             // Last-resort fallback.
-            FRAMEBUFFER = None;
+            *framebuffer_slot() = None;
             let _ = install_console(DEFAULT_COLS, DEFAULT_ROWS);
         }
 
@@ -151,7 +186,7 @@ pub fn init() {
         CURSOR_BLINK_VISIBLE = true;
         CURSOR_BLINK_LAST_TICK = timer::ticks();
 
-        if FRAMEBUFFER.is_none() {
+        if framebuffer_ref().is_none() {
             enable_hardware_cursor();
         }
 
@@ -161,13 +196,13 @@ pub fn init() {
 }
 
 pub fn using_framebuffer() -> bool {
-    unsafe { FRAMEBUFFER.is_some() }
+    unsafe { framebuffer_ref().is_some() }
 }
 
 pub fn text_columns() -> usize {
     ensure_initialized();
     unsafe {
-        if let Some(console) = CONSOLE.as_ref() {
+        if let Some(console) = console_ref() {
             console.cols
         } else {
             DEFAULT_COLS
@@ -178,7 +213,7 @@ pub fn text_columns() -> usize {
 pub fn text_rows() -> usize {
     ensure_initialized();
     unsafe {
-        if let Some(console) = CONSOLE.as_ref() {
+        if let Some(console) = console_ref() {
             console.terminal_rows()
         } else {
             DEFAULT_ROWS - 1
@@ -212,7 +247,7 @@ fn sync_hardware_cursor() {
     }
 
     unsafe {
-        let Some(console) = CONSOLE.as_ref() else {
+        let Some(console) = console_ref() else {
             return;
         };
 
@@ -274,7 +309,7 @@ pub fn color_code() -> u8 {
 pub fn status_row() -> usize {
     ensure_initialized();
     unsafe {
-        if let Some(console) = CONSOLE.as_ref() {
+        if let Some(console) = console_ref() {
             console.rows - 1
         } else {
             DEFAULT_ROWS - 1
@@ -287,7 +322,7 @@ pub fn move_cursor_left(count: usize) {
     leave_scrollback_view_if_needed();
 
     unsafe {
-        let Some(console) = CONSOLE.as_ref() else {
+        let Some(console) = console_ref() else {
             return;
         };
 
@@ -305,7 +340,7 @@ pub fn move_cursor_right(count: usize) {
     leave_scrollback_view_if_needed();
 
     unsafe {
-        let Some(console) = CONSOLE.as_ref() else {
+        let Some(console) = console_ref() else {
             return;
         };
 
@@ -342,7 +377,7 @@ pub fn clear_screen() {
     ensure_initialized();
 
     unsafe {
-        let Some(console) = CONSOLE.as_mut() else {
+        let Some(console) = console_mut() else {
             return;
         };
 
@@ -365,7 +400,7 @@ pub fn clear_screen() {
         CURSOR_COL = 0;
         reset_cursor_blink_locked();
 
-        if FRAMEBUFFER.is_none() {
+        if framebuffer_ref().is_none() {
             enable_hardware_cursor();
         }
         render_active_view_locked();
@@ -376,7 +411,7 @@ pub fn write_status_line(bytes: &[u8; STATUS_LINE_INPUT_WIDTH], color: u8) {
     ensure_initialized();
 
     unsafe {
-        let Some(console) = CONSOLE.as_mut() else {
+        let Some(console) = console_mut() else {
             return;
         };
 
@@ -397,7 +432,7 @@ pub fn write_char_at(row: usize, col: usize, ch: u8, color: u8) {
     ensure_initialized();
 
     unsafe {
-        let Some(console) = CONSOLE.as_mut() else {
+        let Some(console) = console_mut() else {
             return;
         };
 
@@ -426,7 +461,7 @@ pub fn tick_cursor_blink() {
     ensure_initialized();
 
     unsafe {
-        if FRAMEBUFFER.is_none() {
+        if framebuffer_ref().is_none() {
             return;
         }
 
@@ -444,8 +479,7 @@ pub fn tick_cursor_blink() {
 pub fn framebuffer_resolution() -> Option<(usize, usize)> {
     ensure_initialized();
     unsafe {
-        FRAMEBUFFER
-            .as_ref()
+        framebuffer_ref()
             .map(|state| (state.surface_width, state.surface_height))
     }
 }
@@ -453,8 +487,7 @@ pub fn framebuffer_resolution() -> Option<(usize, usize)> {
 pub fn font_metrics() -> Option<(usize, usize)> {
     ensure_initialized();
     unsafe {
-        FRAMEBUFFER
-            .as_ref()
+        framebuffer_ref()
             .map(|state| (FONT_WIDTH, state.font_height.max(1)))
     }
 }
@@ -463,7 +496,7 @@ pub fn set_mouse_cursor(x: i32, y: i32, visible: bool) {
     ensure_initialized();
 
     unsafe {
-        let Some(state) = FRAMEBUFFER.as_mut() else {
+        let Some(state) = framebuffer_mut() else {
             return;
         };
 
@@ -481,7 +514,7 @@ pub fn set_mouse_cursor(x: i32, y: i32, visible: bool) {
 pub fn draw_filled_rect(x: i32, y: i32, width: i32, height: i32, rgb: u32) -> bool {
     ensure_initialized();
     unsafe {
-        let Some(state) = FRAMEBUFFER.as_mut() else {
+        let Some(state) = framebuffer_mut() else {
             return false;
         };
         prepare_raw_framebuffer_draw(state);
@@ -493,7 +526,7 @@ pub fn draw_filled_rect(x: i32, y: i32, width: i32, height: i32, rgb: u32) -> bo
 pub fn begin_draw_batch() {
     ensure_initialized();
     unsafe {
-        let Some(state) = FRAMEBUFFER.as_mut() else {
+        let Some(state) = framebuffer_mut() else {
             return;
         };
         state.draw_batch_depth = state.draw_batch_depth.saturating_add(1);
@@ -503,7 +536,7 @@ pub fn begin_draw_batch() {
 pub fn end_draw_batch() {
     ensure_initialized();
     unsafe {
-        let Some(state) = FRAMEBUFFER.as_mut() else {
+        let Some(state) = framebuffer_mut() else {
             return;
         };
         if state.draw_batch_depth == 0 {
@@ -531,7 +564,7 @@ pub fn end_draw_batch() {
 pub fn draw_horizontal_line(x: i32, y: i32, length: i32, rgb: u32) -> bool {
     ensure_initialized();
     unsafe {
-        let Some(state) = FRAMEBUFFER.as_mut() else {
+        let Some(state) = framebuffer_mut() else {
             return false;
         };
         prepare_raw_framebuffer_draw(state);
@@ -543,7 +576,7 @@ pub fn draw_horizontal_line(x: i32, y: i32, length: i32, rgb: u32) -> bool {
 pub fn draw_vertical_line(x: i32, y: i32, length: i32, rgb: u32) -> bool {
     ensure_initialized();
     unsafe {
-        let Some(state) = FRAMEBUFFER.as_mut() else {
+        let Some(state) = framebuffer_mut() else {
             return false;
         };
         prepare_raw_framebuffer_draw(state);
@@ -555,7 +588,7 @@ pub fn draw_vertical_line(x: i32, y: i32, length: i32, rgb: u32) -> bool {
 pub fn draw_line(x0: i32, y0: i32, x1: i32, y1: i32, rgb: u32) -> bool {
     ensure_initialized();
     unsafe {
-        let Some(state) = FRAMEBUFFER.as_mut() else {
+        let Some(state) = framebuffer_mut() else {
             return false;
         };
         prepare_raw_framebuffer_draw(state);
@@ -595,7 +628,7 @@ pub fn draw_line(x0: i32, y0: i32, x1: i32, y1: i32, rgb: u32) -> bool {
 pub fn draw_text(x: i32, y: i32, text: &str, foreground: u32, background: u32) -> bool {
     ensure_initialized();
     unsafe {
-        let Some(state) = FRAMEBUFFER.as_mut() else {
+        let Some(state) = framebuffer_mut() else {
             return false;
         };
         prepare_raw_framebuffer_draw(state);
@@ -664,7 +697,7 @@ pub fn draw_text_bitmap(
     }
 
     unsafe {
-        let framebuffer = FRAMEBUFFER.as_ref();
+        let framebuffer = framebuffer_ref();
         let font_height = framebuffer.map_or(16usize, |state| state.font_height.max(1));
         let surface_w = dst_width as i32;
         let surface_h = dst_height as i32;
@@ -734,7 +767,7 @@ pub fn draw_circle(cx: i32, cy: i32, radius: i32, rgb: u32) -> bool {
 
     ensure_initialized();
     unsafe {
-        let Some(state) = FRAMEBUFFER.as_mut() else {
+        let Some(state) = framebuffer_mut() else {
             return false;
         };
         prepare_raw_framebuffer_draw(state);
@@ -767,7 +800,7 @@ pub fn draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, rgb: u32) -> bool {
 
     ensure_initialized();
     unsafe {
-        let Some(state) = FRAMEBUFFER.as_mut() else {
+        let Some(state) = framebuffer_mut() else {
             return false;
         };
         prepare_raw_framebuffer_draw(state);
@@ -845,7 +878,7 @@ pub fn blit_bitmap(
     }
 
     unsafe {
-        let Some(state) = FRAMEBUFFER.as_mut() else {
+        let Some(state) = framebuffer_mut() else {
             return false;
         };
         prepare_raw_framebuffer_draw(state);
@@ -1133,7 +1166,7 @@ unsafe fn flush_dirty_rect(
 
 fn scroll() {
     unsafe {
-        let Some(console) = CONSOLE.as_mut() else {
+        let Some(console) = console_mut() else {
             return;
         };
 
@@ -1180,7 +1213,7 @@ pub fn put_char(ch: char) {
 }
 
 unsafe fn backspace_internal() {
-    let Some(console) = CONSOLE.as_mut() else {
+    let Some(console) = console_mut() else {
         return;
     };
 
@@ -1202,7 +1235,7 @@ unsafe fn backspace_internal() {
 }
 
 unsafe fn put_char_internal(ch: char) {
-    let Some(console) = CONSOLE.as_mut() else {
+    let Some(console) = console_mut() else {
         return;
     };
 
@@ -1247,7 +1280,7 @@ pub fn page_up() {
     ensure_initialized();
 
     unsafe {
-        let Some(console) = CONSOLE.as_mut() else {
+        let Some(console) = console_mut() else {
             return;
         };
 
@@ -1274,7 +1307,7 @@ pub fn page_down() {
     ensure_initialized();
 
     unsafe {
-        let Some(console) = CONSOLE.as_mut() else {
+        let Some(console) = console_mut() else {
             return;
         };
 
@@ -1285,7 +1318,7 @@ pub fn page_down() {
         let step = console.terminal_rows().max(1);
         if console.view_offset_rows <= step {
             console.view_offset_rows = 0;
-            if FRAMEBUFFER.is_none() {
+            if framebuffer_ref().is_none() {
                 enable_hardware_cursor();
             }
         } else {
@@ -1299,7 +1332,7 @@ pub fn page_down() {
 #[inline]
 fn leave_scrollback_view_if_needed() {
     unsafe {
-        let Some(console) = CONSOLE.as_mut() else {
+        let Some(console) = console_mut() else {
             return;
         };
 
@@ -1308,7 +1341,7 @@ fn leave_scrollback_view_if_needed() {
         }
 
         console.view_offset_rows = 0;
-        if FRAMEBUFFER.is_none() {
+        if framebuffer_ref().is_none() {
             enable_hardware_cursor();
         }
         render_active_view_locked();
@@ -1351,7 +1384,7 @@ fn view_row_slice<'a>(console: &'a ConsoleState, source_row: usize) -> &'a [Text
 }
 
 unsafe fn render_active_view_locked() {
-    if FRAMEBUFFER.is_some() {
+    if framebuffer_ref().is_some() {
         render_framebuffer_locked();
     } else {
         render_vga_locked();
@@ -1359,7 +1392,7 @@ unsafe fn render_active_view_locked() {
 }
 
 unsafe fn render_vga_locked() {
-    let Some(console) = CONSOLE.as_ref() else {
+    let Some(console) = console_ref() else {
         return;
     };
 
@@ -1394,11 +1427,11 @@ unsafe fn render_vga_locked() {
 }
 
 unsafe fn render_status_row_locked() {
-    let Some(console) = CONSOLE.as_ref() else {
+    let Some(console) = console_ref() else {
         return;
     };
 
-    if let Some(state) = FRAMEBUFFER.as_mut() {
+    if let Some(state) = framebuffer_mut() {
         let terminal_rows = console.terminal_rows();
         let cell_height = state.font_height.max(1);
 
@@ -1426,10 +1459,10 @@ unsafe fn render_status_row_locked() {
 }
 
 unsafe fn render_framebuffer_locked() {
-    let Some(console) = CONSOLE.as_ref() else {
+    let Some(console) = console_ref() else {
         return;
     };
-    let Some(state) = FRAMEBUFFER.as_mut() else {
+    let Some(state) = framebuffer_mut() else {
         return;
     };
 
@@ -1993,7 +2026,7 @@ unsafe fn install_console(cols: usize, rows: usize) -> bool {
     }
     scrollback.resize(scrollback_len, BLANK_CELL);
 
-    CONSOLE = Some(ConsoleState {
+    *console_slot() = Some(ConsoleState {
         cols,
         rows,
         terminal,

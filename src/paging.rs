@@ -363,6 +363,52 @@ pub fn use_kernel_address_space() {
     switch_address_space(kernel_directory_phys() as u32);
 }
 
+pub fn is_user_accessible_range(start: usize, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+
+    let end = match start.checked_add(len) {
+        Some(value) => value,
+        None => return false,
+    };
+    if !is_user_range(start, end) {
+        return false;
+    }
+
+    let first_page = align_down(start, PAGE_SIZE);
+    let last_page_exclusive = match align_up(end, PAGE_SIZE) {
+        Some(value) => value,
+        None => return false,
+    };
+
+    let directory = unsafe { (read_cr3() & PAGE_ENTRY_ADDR_MASK) as *const u32 };
+
+    let mut page = first_page;
+    while page < last_page_exclusive {
+        let pde_index = page >> 22;
+        let pte_index = (page >> 12) & 0x3FF;
+
+        let pde = unsafe { directory.add(pde_index).read() };
+        if (pde & (PDE_PRESENT | PDE_USER)) != (PDE_PRESENT | PDE_USER) {
+            return false;
+        }
+
+        let table = (pde & PAGE_ENTRY_ADDR_MASK) as *const u32;
+        let pte = unsafe { table.add(pte_index).read() };
+        if (pte & (PTE_PRESENT | PTE_USER)) != (PTE_PRESENT | PTE_USER) {
+            return false;
+        }
+
+        page = match page.checked_add(PAGE_SIZE) {
+            Some(value) => value,
+            None => return false,
+        };
+    }
+
+    true
+}
+
 pub fn stats() -> PagingStats {
     let framebuffer = framebuffer_mapping();
     let mapped_regions = (IDENTITY_MAPPED_BYTES / PAGE_SIZE)

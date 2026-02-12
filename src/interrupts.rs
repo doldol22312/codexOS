@@ -185,10 +185,7 @@ pub extern "C" fn interrupt_dispatch(frame: *mut InterruptFrame) -> *mut Interru
     let vector = unsafe { (*frame).int_no as u8 };
 
     match vector {
-        0..=31 => {
-            let frame = unsafe { &*frame };
-            handle_exception(frame)
-        }
+        0..=31 => handle_exception(frame),
         32 => {
             timer::handle_interrupt();
             let next = task::on_timer_interrupt(frame);
@@ -214,26 +211,58 @@ pub extern "C" fn interrupt_dispatch(frame: *mut InterruptFrame) -> *mut Interru
     }
 }
 
-fn handle_exception(frame: &InterruptFrame) -> ! {
-    let vector = frame.int_no as usize;
+fn handle_exception(frame: *mut InterruptFrame) -> *mut InterruptFrame {
+    let frame_ref = unsafe { &*frame };
+    let vector = frame_ref.int_no as usize;
     let fault_address = if vector == 14 {
         Some(paging::page_fault_address())
     } else {
         None
     };
+    let from_user = (frame_ref.cs & 0x3) == 0x3;
 
     serial_println!(
-        "exception: vec={} err={:#x} eip={:#x}",
+        "exception: vec={} err={:#x} eip={:#x} cs={:#x}",
         vector,
-        frame.err_code,
-        frame.eip
+        frame_ref.err_code,
+        frame_ref.eip,
+        frame_ref.cs
     );
     if let Some(address) = fault_address {
         serial_println!("page-fault address: {:#010x}", address);
     }
+
+    if from_user {
+        let task_id = task::current_task_id();
+        let task_display = task_id.map(|id| id as i64).unwrap_or(-1);
+        serial_println!(
+            "exception: terminating user task {}",
+            task_display
+        );
+
+        println!();
+        println!(
+            "user task fault: EXCEPTION {}: {}",
+            vector, EXCEPTION_MESSAGES[vector]
+        );
+        println!(
+            "task={} err={} eip={:#010x}",
+            task_display,
+            frame_ref.err_code,
+            frame_ref.eip
+        );
+        if let Some(address) = fault_address {
+            println!("addr={:#010x}", address);
+        }
+
+        if let Some(next) = task::handle_user_exception(frame) {
+            return next;
+        }
+    }
+
     println!();
     println!("EXCEPTION {}: {}", vector, EXCEPTION_MESSAGES[vector]);
-    println!("err={} eip={:#010x}", frame.err_code, frame.eip);
+    println!("err={} eip={:#010x}", frame_ref.err_code, frame_ref.eip);
     if let Some(address) = fault_address {
         println!("addr={:#010x}", address);
     }
