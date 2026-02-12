@@ -28,7 +28,7 @@ A bare-metal operating system written from scratch in Rust for x86 (32-bit). Boo
 - **Window compositor** -- up to 16 windows with drag, resize, minimize, maximize, z-ordering, title bars, close buttons, and redraw-safe composition paths
 
 ### Shell & Desktop
-- **Interactive shell** -- 32 built-in commands, command history (32 entries), tab completion for commands and filenames, cursor-based line editing, and an in-shell text editor
+- **Interactive shell** -- 33 built-in commands, command history (32 entries), tab completion for commands and filenames, cursor-based line editing, and an in-shell text editor
 - **Desktop environment** -- start menu launcher, app registry, taskbar with open-window buttons and clock, and desktop background layering behind compositor windows
 - **Desktop apps** -- functional Terminal (shell session), File Browser (CFS1 directory listing), System Monitor (heap/uptime/task metrics), Notes (text editor), and Pixel Paint (color palette + canvas)
 - **Custom filesystem (CFS1)** -- superblock + directory table + file storage with create, read, write, delete, list, and format operations (16 MB data disk, up to 256 files)
@@ -50,6 +50,7 @@ A bare-metal operating system written from scratch in Rust for x86 (32-bit). Boo
 | `fscat <name>` | Read a file |
 | `fsdelete <name>` | Delete a file |
 | `edit <name>` | Open simple line editor for a file |
+| `elfrun <name>` | Load and run an ELF32 user process from CFS1 (foreground) |
 | `date` | Current date |
 | `time` | Current time |
 | `rtc` | Full RTC status |
@@ -109,11 +110,54 @@ make run
 # Build and run with serial output on stdio (headless)
 make run-serial
 
+# Build sample user ELF, inject into CFS1, and boot (serial)
+make run-user-hello
+
+# Build scheduler/syscall stress user ELF, inject into CFS1, and boot (serial)
+make run-user-stress
+
 # Debug build override
 make PROFILE=debug run
 
 # Clean build artifacts
 make clean
+```
+
+### Userspace ELF Smoke Test
+
+`make run-user-hello` compiles `userspace/hello_user.S`, injects it as `hello.elf` into `build/data.img` (auto-formatting CFS1 if needed), and boots the kernel in serial mode.
+
+At the `codexOS>` prompt:
+
+```text
+fsls
+elfrun hello.elf
+```
+
+Expected output includes:
+
+```text
+elfrun: started hello.elf as task <id>
+hello from user mode
+codexOS>
+```
+
+### Userspace Scheduler Stress Test
+
+`make run-user-stress` compiles `userspace/stress_user.S`, injects it as `stress.elf` into `build/data.img`, and boots in serial mode.
+
+At the `codexOS>` prompt:
+
+```text
+elfrun stress.elf
+```
+
+Expected output includes repeated ticks plus completion:
+
+```text
+stress tick
+...
+stress complete
 ```
 
 ## Project Structure
@@ -126,6 +170,7 @@ codexOS/
 │   ├── allocator.rs       Free-list heap allocator (8 MB)
 │   ├── ata.rs             ATA PIO disk driver
 │   ├── bootinfo.rs        Stage2 -> kernel boot video metadata
+│   ├── elf.rs             ELF32 userspace loader
 │   ├── fs.rs              Custom filesystem (CFS1)
 │   ├── gdt.rs             Global Descriptor Table
 │   ├── idt.rs             Interrupt Descriptor Table
@@ -140,7 +185,11 @@ codexOS/
 │   ├── reboot.rs          System reboot
 │   ├── rtc.rs             CMOS real-time clock
 │   ├── serial.rs          COM1 UART driver
-│   ├── shell.rs           Interactive command shell + desktop apps
+│   ├── shell/
+│   │   ├── mod.rs         Core REPL loop, history, and tab completion
+│   │   ├── editor.rs      Built-in line editor command implementation
+│   │   ├── demos.rs       Graphics/UI/desktop demo command implementations
+│   │   └── commands/      Non-demo command groups
 │   ├── shutdown.rs        ACPI/APM power off
 │   ├── sync.rs            Mutex and Semaphore primitives
 │   ├── task.rs            Preemptive task scheduler (round-robin)
@@ -154,6 +203,11 @@ codexOS/
 │   └── bin/
 │       ├── boot_stage1.rs MBR bootloader (512 bytes)
 │       └── boot_stage2.rs Stage 2: VBE mode set, A20, protected mode, kernel load
+├── userspace/
+│   ├── hello_user.S       Minimal ring-3 syscall test program
+│   └── stress_user.S      Ring-3 yield/sleep/write stress test program
+├── tools/
+│   └── inject_cfs.py      Host-side CFS1 file injector
 ├── linker.ld              Kernel linker script (loads at 1 MB)
 ├── stage1.ld              Stage 1 bootloader linker script
 ├── stage2.ld              Stage 2 bootloader linker script

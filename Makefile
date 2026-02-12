@@ -17,6 +17,12 @@ STAGE2_ELF := target/$(TARGET_TRIPLE)/$(PROFILE)/boot_stage2
 KERNEL_BIN := $(BUILD_DIR)/kernel.bin
 STAGE1_BIN := $(BUILD_DIR)/boot_stage1.bin
 STAGE2_BIN := $(BUILD_DIR)/boot_stage2.bin
+USER_HELLO_OBJ := $(BUILD_DIR)/hello_user.o
+USER_HELLO_ELF := $(BUILD_DIR)/hello.elf
+USER_HELLO_FS_NAME := hello.elf
+USER_STRESS_OBJ := $(BUILD_DIR)/stress_user.o
+USER_STRESS_ELF := $(BUILD_DIR)/stress.elf
+USER_STRESS_FS_NAME := stress.elf
 
 FLOPPY_SECTORS := 2880
 DATA_DISK_SECTORS := 32768
@@ -30,7 +36,7 @@ ifeq ($(PROFILE),release)
 PROFILE_FLAG := --release
 endif
 
-.PHONY: all build kernel stage1 stage2 image data-image run run-serial clean
+.PHONY: all build kernel stage1 stage2 image data-image user-hello user-stress inject-user-hello inject-user-stress inject-user-samples run-user-hello run-user-stress run run-serial clean
 
 all: build
 
@@ -61,6 +67,30 @@ $(STAGE2_BIN): stage2 | $(BUILD_STAMP)
 
 $(KERNEL_BIN): kernel | $(BUILD_STAMP)
 	objcopy -O binary $(KERNEL_ELF) $(KERNEL_BIN)
+
+$(USER_HELLO_OBJ): userspace/hello_user.S | $(BUILD_STAMP)
+	as --32 -o $(USER_HELLO_OBJ) userspace/hello_user.S
+
+$(USER_HELLO_ELF): $(USER_HELLO_OBJ) | $(BUILD_STAMP)
+	ld -m elf_i386 -nostdlib -Ttext 0x40010000 -e _start -o $(USER_HELLO_ELF) $(USER_HELLO_OBJ)
+
+user-hello: $(USER_HELLO_ELF)
+
+$(USER_STRESS_OBJ): userspace/stress_user.S | $(BUILD_STAMP)
+	as --32 -o $(USER_STRESS_OBJ) userspace/stress_user.S
+
+$(USER_STRESS_ELF): $(USER_STRESS_OBJ) | $(BUILD_STAMP)
+	ld -m elf_i386 -nostdlib -Ttext 0x40012000 -e _start -o $(USER_STRESS_ELF) $(USER_STRESS_OBJ)
+
+user-stress: $(USER_STRESS_ELF)
+
+inject-user-hello: data-image user-hello
+	python3 tools/inject_cfs.py --image $(DATA_IMG_PATH) --host $(USER_HELLO_ELF) --name $(USER_HELLO_FS_NAME) --format-if-needed
+
+inject-user-stress: data-image user-stress
+	python3 tools/inject_cfs.py --image $(DATA_IMG_PATH) --host $(USER_STRESS_ELF) --name $(USER_STRESS_FS_NAME) --format-if-needed
+
+inject-user-samples: inject-user-hello inject-user-stress
 
 $(BOOT_LAYOUT): $(STAGE2_BIN) $(KERNEL_BIN) | $(BUILD_STAMP)
 	@stage2_bytes=$$(stat -c%s $(STAGE2_BIN)); \
@@ -108,6 +138,12 @@ run: image
 	$(QEMU) -drive format=raw,file=$(IMG_PATH),if=floppy -drive format=raw,file=$(DATA_IMG_PATH),if=ide,index=0,media=disk -boot a -m 128M
 
 run-serial: image
+	$(QEMU) -drive format=raw,file=$(IMG_PATH),if=floppy -drive format=raw,file=$(DATA_IMG_PATH),if=ide,index=0,media=disk -boot a -m 128M -display none -serial stdio -monitor none -no-reboot -no-shutdown
+
+run-user-hello: image inject-user-hello
+	$(QEMU) -drive format=raw,file=$(IMG_PATH),if=floppy -drive format=raw,file=$(DATA_IMG_PATH),if=ide,index=0,media=disk -boot a -m 128M -display none -serial stdio -monitor none -no-reboot -no-shutdown
+
+run-user-stress: image inject-user-stress
 	$(QEMU) -drive format=raw,file=$(IMG_PATH),if=floppy -drive format=raw,file=$(DATA_IMG_PATH),if=ide,index=0,media=disk -boot a -m 128M -display none -serial stdio -monitor none -no-reboot -no-shutdown
 
 clean:

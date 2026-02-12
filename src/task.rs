@@ -10,22 +10,31 @@ use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::{interrupts::InterruptFrame, timer};
+use crate::{gdt, interrupts::InterruptFrame, paging, timer};
 
 pub type TaskId = u32;
 pub type TaskEntry = fn(*mut u8);
 
 const MAX_TASKS: usize = 16;
 const DEFAULT_STACK_SIZE: usize = 64 * 1024;
+const USER_KERNEL_STACK_SIZE: usize = 16 * 1024;
 const IDLE_STACK_SIZE: usize = 16 * 1024;
 const MIN_STACK_SIZE: usize = 4096;
 
-const KERNEL_CODE_SELECTOR: u32 = 0x08;
-const KERNEL_DATA_SELECTOR: u32 = 0x10;
 const INITIAL_EFLAGS: u32 = 0x202;
+const SYSCALL_WRITE_CHUNK: usize = 128;
+const SYSCALL_WRITE_MAX: usize = 16 * 1024;
 
-const SYSCALL_YIELD: u32 = 1;
-const SYSCALL_SLEEP: u32 = 2;
+pub mod syscall {
+    pub const EXIT: u32 = 0;
+    pub const YIELD: u32 = 1;
+    pub const SLEEP: u32 = 2;
+    pub const WRITE: u32 = 3;
+
+    pub const OK: u32 = 0;
+    pub const ERR_UNSUPPORTED: u32 = u32::MAX;
+    pub const ERR_INVALID: u32 = u32::MAX - 1;
+}
 
 static SCHEDULER_ONLINE: AtomicBool = AtomicBool::new(false);
 
@@ -50,20 +59,38 @@ enum ScheduleCause {
     Sleep(u32),
 }
 
+enum TaskContext {
+    Kernel { entry: TaskEntry, arg: *mut u8 },
+    User,
+}
+
+enum TaskAddressSpace {
+    Kernel,
+    User(paging::AddressSpace),
+}
+
 struct Task {
     id: TaskId,
     state: TaskState,
     wake_tick: u32,
-    _stack: Option<Box<[u8]>>,
+    _kernel_stack: Option<Box<[u8]>>,
+    kernel_stack_top: u32,
     saved_esp: u32,
-    entry: TaskEntry,
-    arg: *mut u8,
+    context: TaskContext,
+    address_space: TaskAddressSpace,
     is_idle: bool,
 }
 
 impl Task {
     fn is_runnable(&self) -> bool {
         matches!(self.state, TaskState::Ready | TaskState::Running)
+    }
+
+    fn cr3(&self) -> u32 {
+        match &self.address_space {
+            TaskAddressSpace::Kernel => paging::kernel_directory_phys() as u32,
+            TaskAddressSpace::User(space) => space.cr3(),
+        }
     }
 }
 
@@ -87,17 +114,21 @@ impl Scheduler {
             id: 0,
             state: TaskState::Running,
             wake_tick: 0,
-            _stack: None,
+            _kernel_stack: None,
+            kernel_stack_top: read_current_esp(),
             saved_esp: 0,
-            entry: bootstrap_task_entry,
-            arg: ptr::null_mut(),
+            context: TaskContext::Kernel {
+                entry: bootstrap_task_entry,
+                arg: ptr::null_mut(),
+            },
+            address_space: TaskAddressSpace::Kernel,
             is_idle: false,
         });
         self.current_index = 0;
         self.next_id = 1;
     }
 
-    fn spawn_internal(
+    fn spawn_kernel_internal(
         &mut self,
         entry: TaskEntry,
         arg: *mut u8,
@@ -109,8 +140,9 @@ impl Scheduler {
         }
 
         let stack_bytes = stack_size.max(MIN_STACK_SIZE);
-        let mut stack = vec![0u8; stack_bytes].into_boxed_slice();
-        let saved_esp = build_initial_frame(stack.as_mut()).ok_or("invalid task stack")?;
+        let mut kernel_stack = vec![0u8; stack_bytes].into_boxed_slice();
+        let saved_esp = build_initial_kernel_frame(kernel_stack.as_mut()).ok_or("invalid task stack")?;
+        let kernel_stack_top = stack_top(kernel_stack.as_ref());
 
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
@@ -119,11 +151,45 @@ impl Scheduler {
             id,
             state: TaskState::Ready,
             wake_tick: 0,
-            _stack: Some(stack),
+            _kernel_stack: Some(kernel_stack),
+            kernel_stack_top,
             saved_esp,
-            entry,
-            arg,
+            context: TaskContext::Kernel { entry, arg },
+            address_space: TaskAddressSpace::Kernel,
             is_idle,
+        });
+
+        Ok(id)
+    }
+
+    fn spawn_user_internal(
+        &mut self,
+        entry_point: u32,
+        user_stack_top: u32,
+        address_space: paging::AddressSpace,
+    ) -> Result<TaskId, &'static str> {
+        if self.tasks.len() >= MAX_TASKS {
+            return Err("task limit reached");
+        }
+
+        let mut kernel_stack = vec![0u8; USER_KERNEL_STACK_SIZE].into_boxed_slice();
+        let saved_esp = build_initial_user_frame(kernel_stack.as_mut(), entry_point, user_stack_top)
+            .ok_or("invalid user task stack")?;
+        let kernel_stack_top = stack_top(kernel_stack.as_ref());
+
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+
+        self.tasks.push(Task {
+            id,
+            state: TaskState::Ready,
+            wake_tick: 0,
+            _kernel_stack: Some(kernel_stack),
+            kernel_stack_top,
+            saved_esp,
+            context: TaskContext::User,
+            address_space: TaskAddressSpace::User(address_space),
+            is_idle: false,
         });
 
         Ok(id)
@@ -216,12 +282,18 @@ impl Scheduler {
             self.tasks[next].state = TaskState::Running;
         }
 
+        let next_cr3 = self.tasks[next].cr3();
+        let next_stack_top = self.tasks[next].kernel_stack_top;
         let next_esp = self.tasks[next].saved_esp;
-        if next_esp == 0 {
-            return frame;
-        }
 
-        next_esp as *mut InterruptFrame
+        paging::switch_address_space(next_cr3);
+        gdt::set_kernel_stack(next_stack_top);
+
+        if next_esp == 0 {
+            frame
+        } else {
+            next_esp as *mut InterruptFrame
+        }
     }
 
     fn mark_current_exited(&mut self) {
@@ -257,7 +329,10 @@ pub fn init() -> Result<(), &'static str> {
 
         let mut scheduler = Scheduler::new();
         scheduler.add_bootstrap_task();
-        scheduler.spawn_internal(idle_task_entry, ptr::null_mut(), IDLE_STACK_SIZE, true)?;
+        scheduler.spawn_kernel_internal(idle_task_entry, ptr::null_mut(), IDLE_STACK_SIZE, true)?;
+
+        gdt::set_kernel_stack(scheduler.tasks[scheduler.current_index].kernel_stack_top);
+        paging::use_kernel_address_space();
 
         *scheduler_slot = Some(scheduler);
         SCHEDULER_ONLINE.store(true, Ordering::Release);
@@ -279,7 +354,21 @@ pub fn spawn_kernel_with_stack(
         let Some(scheduler) = scheduler_slot.as_mut() else {
             return Err("scheduler not initialized");
         };
-        scheduler.spawn_internal(entry, arg, stack_size, false)
+        scheduler.spawn_kernel_internal(entry, arg, stack_size, false)
+    })
+}
+
+pub fn spawn_user(
+    entry_point: u32,
+    user_stack_top: u32,
+    address_space: paging::AddressSpace,
+) -> Result<TaskId, &'static str> {
+    with_interrupts_disabled(|| unsafe {
+        let scheduler_slot = &mut *SCHEDULER.0.get();
+        let Some(scheduler) = scheduler_slot.as_mut() else {
+            return Err("scheduler not initialized");
+        };
+        scheduler.spawn_user_internal(entry_point, user_stack_top, address_space)
     })
 }
 
@@ -301,29 +390,47 @@ pub fn handle_syscall(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     let frame_ref = unsafe { &mut *frame };
 
     if !SCHEDULER_ONLINE.load(Ordering::Acquire) {
-        frame_ref.eax = u32::MAX;
+        frame_ref.eax = syscall::ERR_UNSUPPORTED;
         return frame;
     }
+
+    let from_user = (frame_ref.cs & 0x3) == 0x3;
 
     with_interrupts_disabled(|| unsafe {
         let scheduler_slot = &mut *SCHEDULER.0.get();
         let Some(scheduler) = scheduler_slot.as_mut() else {
-            frame_ref.eax = u32::MAX;
+            frame_ref.eax = syscall::ERR_UNSUPPORTED;
             return frame;
         };
 
         match frame_ref.eax {
-            SYSCALL_YIELD => {
-                frame_ref.eax = 0;
+            syscall::EXIT => {
+                frame_ref.eax = syscall::OK;
+                scheduler.mark_current_exited();
                 scheduler.schedule(frame, ScheduleCause::Yield)
             }
-            SYSCALL_SLEEP => {
+            syscall::YIELD => {
+                frame_ref.eax = syscall::OK;
+                scheduler.schedule(frame, ScheduleCause::Yield)
+            }
+            syscall::SLEEP => {
                 let ticks = frame_ref.ebx.max(1);
-                frame_ref.eax = 0;
+                frame_ref.eax = syscall::OK;
                 scheduler.schedule(frame, ScheduleCause::Sleep(ticks))
             }
+            syscall::WRITE => {
+                frame_ref.eax = match syscall_write(
+                    frame_ref.ebx as usize,
+                    frame_ref.ecx as usize,
+                    from_user,
+                ) {
+                    Ok(written) => written as u32,
+                    Err(code) => code,
+                };
+                frame
+            }
             _ => {
-                frame_ref.eax = u32::MAX;
+                frame_ref.eax = syscall::ERR_UNSUPPORTED;
                 frame
             }
         }
@@ -338,7 +445,7 @@ pub fn yield_now() {
     unsafe {
         asm!(
             "int 0x80",
-            in("eax") SYSCALL_YIELD,
+            in("eax") syscall::YIELD,
             lateout("eax") _,
         );
     }
@@ -358,7 +465,7 @@ pub fn sleep_ticks(ticks: u32) {
     unsafe {
         asm!(
             "int 0x80",
-            in("eax") SYSCALL_SLEEP,
+            in("eax") syscall::SLEEP,
             in("ebx") ticks,
             lateout("eax") _,
         );
@@ -371,6 +478,20 @@ pub fn current_task_id() -> Option<TaskId> {
         let scheduler = scheduler_slot.as_ref()?;
         let task = scheduler.tasks.get(scheduler.current_index)?;
         Some(task.id)
+    })
+}
+
+pub fn is_task_alive(task_id: TaskId) -> bool {
+    with_interrupts_disabled(|| unsafe {
+        let scheduler_slot = &*SCHEDULER.0.get();
+        let Some(scheduler) = scheduler_slot.as_ref() else {
+            return false;
+        };
+
+        scheduler
+            .tasks
+            .iter()
+            .any(|task| task.id == task_id && task.state != TaskState::Exited)
     })
 }
 
@@ -396,7 +517,9 @@ extern "C" fn task_entry_trampoline() -> ! {
         let scheduler_slot = &*SCHEDULER.0.get();
         if let Some(scheduler) = scheduler_slot.as_ref() {
             if let Some(task) = scheduler.tasks.get(scheduler.current_index) {
-                return (task.entry, task.arg);
+                if let TaskContext::Kernel { entry, arg } = task.context {
+                    return (entry, arg);
+                }
             }
         }
         (idle_task_entry as TaskEntry, ptr::null_mut())
@@ -416,7 +539,14 @@ fn idle_task_entry(_arg: *mut u8) {
     }
 }
 
-fn build_initial_frame(stack: &mut [u8]) -> Option<u32> {
+#[repr(C)]
+struct UserInterruptFrame {
+    frame: InterruptFrame,
+    user_esp: u32,
+    user_ss: u32,
+}
+
+fn build_initial_kernel_frame(stack: &mut [u8]) -> Option<u32> {
     let frame_size = core::mem::size_of::<InterruptFrame>();
     if stack.len() < frame_size + 16 {
         return None;
@@ -432,10 +562,10 @@ fn build_initial_frame(stack: &mut [u8]) -> Option<u32> {
     let frame = frame_addr as *mut InterruptFrame;
     unsafe {
         frame.write(InterruptFrame {
-            gs: KERNEL_DATA_SELECTOR,
-            fs: KERNEL_DATA_SELECTOR,
-            es: KERNEL_DATA_SELECTOR,
-            ds: KERNEL_DATA_SELECTOR,
+            gs: gdt::kernel_data_selector() as u32,
+            fs: gdt::kernel_data_selector() as u32,
+            es: gdt::kernel_data_selector() as u32,
+            ds: gdt::kernel_data_selector() as u32,
             edi: 0,
             esi: 0,
             ebp: 0,
@@ -447,12 +577,100 @@ fn build_initial_frame(stack: &mut [u8]) -> Option<u32> {
             int_no: 0,
             err_code: 0,
             eip: task_entry_trampoline as *const () as usize as u32,
-            cs: KERNEL_CODE_SELECTOR,
+            cs: gdt::kernel_code_selector() as u32,
             eflags: INITIAL_EFLAGS,
         });
     }
 
     Some(frame_addr as u32)
+}
+
+fn build_initial_user_frame(stack: &mut [u8], entry_point: u32, user_stack_top: u32) -> Option<u32> {
+    let frame_size = core::mem::size_of::<UserInterruptFrame>();
+    if stack.len() < frame_size + 16 {
+        return None;
+    }
+
+    let stack_start = stack.as_ptr() as usize;
+    let stack_top = stack_start.checked_add(stack.len())?;
+    let frame_addr = stack_top.checked_sub(frame_size)? & !0x0F;
+    if frame_addr < stack_start {
+        return None;
+    }
+
+    let frame = frame_addr as *mut UserInterruptFrame;
+    unsafe {
+        frame.write(UserInterruptFrame {
+            frame: InterruptFrame {
+                gs: gdt::user_data_selector() as u32,
+                fs: gdt::user_data_selector() as u32,
+                es: gdt::user_data_selector() as u32,
+                ds: gdt::user_data_selector() as u32,
+                edi: 0,
+                esi: 0,
+                ebp: 0,
+                esp: 0,
+                ebx: 0,
+                edx: 0,
+                ecx: 0,
+                eax: 0,
+                int_no: 0,
+                err_code: 0,
+                eip: entry_point,
+                cs: gdt::user_code_selector() as u32,
+                eflags: INITIAL_EFLAGS,
+            },
+            user_esp: user_stack_top,
+            user_ss: gdt::user_data_selector() as u32,
+        });
+    }
+
+    Some(frame_addr as u32)
+}
+
+fn syscall_write(ptr: usize, len: usize, from_user: bool) -> Result<usize, u32> {
+    if len == 0 {
+        return Ok(0);
+    }
+    if len > SYSCALL_WRITE_MAX {
+        return Err(syscall::ERR_INVALID);
+    }
+
+    if from_user {
+        let end = ptr.checked_add(len).ok_or(syscall::ERR_INVALID)?;
+        if ptr < paging::USER_SPACE_BASE || end > paging::USER_SPACE_LIMIT {
+            return Err(syscall::ERR_INVALID);
+        }
+    }
+
+    let mut copied = 0usize;
+    let mut scratch = [0u8; SYSCALL_WRITE_CHUNK];
+
+    while copied < len {
+        let chunk = (len - copied).min(scratch.len());
+        for index in 0..chunk {
+            let src = (ptr + copied + index) as *const u8;
+            scratch[index] = unsafe { src.read() };
+        }
+
+        if let Ok(text) = core::str::from_utf8(&scratch[..chunk]) {
+            crate::print!("{}", text);
+            crate::serial_print!("{}", text);
+        } else {
+            for byte in &scratch[..chunk] {
+                let ch = match *byte {
+                    b'\n' | b'\r' | b'\t' | 0x20..=0x7E => *byte as char,
+                    _ => '?',
+                };
+                crate::print!("{}", ch);
+                crate::serial_print!("{}", ch);
+            }
+        }
+
+        copied += chunk;
+    }
+
+    Ok(copied)
 }
 
 fn busy_sleep_ticks(ticks: u32) {
@@ -467,6 +685,20 @@ fn busy_sleep_ticks(ticks: u32) {
 #[inline]
 fn tick_reached(now: u32, target: u32) -> bool {
     now.wrapping_sub(target) < (u32::MAX / 2)
+}
+
+#[inline]
+fn stack_top(stack: &[u8]) -> u32 {
+    (stack.as_ptr() as usize).saturating_add(stack.len()) as u32
+}
+
+#[inline]
+fn read_current_esp() -> u32 {
+    let esp: u32;
+    unsafe {
+        asm!("mov {}, esp", out(reg) esp, options(nomem, preserves_flags));
+    }
+    esp
 }
 
 #[inline]

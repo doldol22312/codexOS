@@ -24,12 +24,17 @@ impl IdtEntry {
     }
 
     fn new(handler: extern "C" fn()) -> Self {
+        Self::new_with_dpl(handler, 0)
+    }
+
+    fn new_with_dpl(handler: extern "C" fn(), dpl: u8) -> Self {
         let address = handler as usize as u32;
+        let flags = 0x8E | ((dpl & 0x3) << 5);
         Self {
             offset_low: (address & 0xFFFF) as u16,
             selector: 0x08,
             zero: 0,
-            flags: 0x8E,
+            flags,
             offset_high: ((address >> 16) & 0xFFFF) as u16,
         }
     }
@@ -94,7 +99,7 @@ pub fn init() {
         IDT[45] = IdtEntry::new(interrupts::isr45);
         IDT[46] = IdtEntry::new(interrupts::isr46);
         IDT[47] = IdtEntry::new(interrupts::isr47);
-        IDT[128] = IdtEntry::new(interrupts::isr128);
+        IDT[128] = IdtEntry::new_with_dpl(interrupts::isr128, 3);
 
         let idt_descriptor = IdtDescriptor {
             limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,

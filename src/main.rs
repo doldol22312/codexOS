@@ -6,6 +6,7 @@ mod allocator;
 mod ata;
 mod boot;
 mod bootinfo;
+mod elf;
 mod fs;
 mod gdt;
 mod idt;
