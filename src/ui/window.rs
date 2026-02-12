@@ -75,6 +75,14 @@ pub struct WindowDebugSnapshot {
     pub resizing_window_frame: Option<Rect>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WindowSummary {
+    pub id: WindowId,
+    pub title: &'static str,
+    pub minimized: bool,
+    pub focused: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DecorationButton {
     Close,
@@ -375,6 +383,71 @@ impl WindowManager {
         self.focus_id
     }
 
+    pub fn window_client_rect(&self, id: WindowId) -> Option<Rect> {
+        let index = self.window_index(id)?;
+        Some(self.windows[index].client_rect())
+    }
+
+    pub fn window_frame_rect(&self, id: WindowId) -> Option<Rect> {
+        let index = self.window_index(id)?;
+        Some(self.windows[index].frame_rect())
+    }
+
+    pub fn window_summaries(&self, out: &mut [WindowSummary]) -> usize {
+        let mut written = 0usize;
+        for window in self.windows.iter() {
+            if written >= out.len() {
+                break;
+            }
+            out[written] = WindowSummary {
+                id: window.id,
+                title: window.title,
+                minimized: window.minimized,
+                focused: self.focus_id == Some(window.id),
+            };
+            written += 1;
+        }
+        written
+    }
+
+    pub fn activate_window(&mut self, id: WindowId) -> bool {
+        let Some(index) = self.window_index(id) else {
+            return false;
+        };
+
+        let focused = self.focus_id == Some(id);
+        let minimized = self.windows[index].minimized;
+
+        if focused && !minimized {
+            self.windows[index].minimized = true;
+            self.dragging = None;
+            self.resizing = None;
+            self.pressed_decoration = None;
+            return true;
+        }
+
+        self.focus_window(id)
+    }
+
+    pub fn focus_window(&mut self, id: WindowId) -> bool {
+        let Some(index) = self.window_index(id) else {
+            return false;
+        };
+
+        let mut redraw = false;
+        if self.windows[index].minimized {
+            self.windows[index].minimized = false;
+            redraw = true;
+        }
+        if self.bring_to_front(id) {
+            redraw = true;
+        }
+        if self.set_focus(Some(id)) {
+            redraw = true;
+        }
+        redraw
+    }
+
     pub fn debug_snapshot(&self, cursor_x: i32, cursor_y: i32) -> WindowDebugSnapshot {
         let cursor_window_id = self.top_window_at(cursor_x, cursor_y);
         let cursor_window_frame =
@@ -450,10 +523,14 @@ impl WindowManager {
             self.desktop_color,
         );
 
+        self.compose_windows();
+        vga::end_draw_batch();
+    }
+
+    pub fn compose_windows(&self) {
         for window in self.windows.iter() {
             self.draw_window(window);
         }
-        vga::end_draw_batch();
     }
 
     pub fn handle_event(&mut self, event: InputEvent, desktop_bounds: Rect) -> WindowEventResult {

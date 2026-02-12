@@ -639,6 +639,94 @@ pub fn draw_text(x: i32, y: i32, text: &str, foreground: u32, background: u32) -
     true
 }
 
+pub fn draw_text_bitmap(
+    dst_pixels: &mut [u32],
+    dst_width: usize,
+    dst_height: usize,
+    dst_stride: usize,
+    x: i32,
+    y: i32,
+    text: &str,
+    foreground: u32,
+    background: u32,
+) -> bool {
+    ensure_initialized();
+
+    if dst_width == 0 || dst_height == 0 || dst_stride < dst_width {
+        return false;
+    }
+
+    let Some(required) = dst_stride.checked_mul(dst_height) else {
+        return false;
+    };
+    if dst_pixels.len() < required {
+        return false;
+    }
+
+    unsafe {
+        let framebuffer = FRAMEBUFFER.as_ref();
+        let font_height = framebuffer.map_or(16usize, |state| state.font_height.max(1));
+        let surface_w = dst_width as i32;
+        let surface_h = dst_height as i32;
+
+        let origin_x = x;
+        let mut cursor_x = x;
+        let mut cursor_y = y;
+
+        for byte in text.bytes() {
+            match byte {
+                b'\n' => {
+                    cursor_x = origin_x;
+                    cursor_y = cursor_y.saturating_add(font_height as i32);
+                }
+                b'\r' => {
+                    cursor_x = origin_x;
+                }
+                value => {
+                    let glyph = if matches!(value, 0x20..=0x7E) {
+                        value
+                    } else {
+                        b'?'
+                    };
+
+                    for row in 0..font_height {
+                        let py = cursor_y.saturating_add(row as i32);
+                        if py < 0 || py >= surface_h {
+                            continue;
+                        }
+
+                        let bits = if let Some(state) = framebuffer {
+                            glyph_bits(state, glyph, row)
+                        } else {
+                            fallback_glyph_bits(glyph, row, font_height)
+                        };
+
+                        let row_offset = py as usize * dst_stride;
+                        for col in 0..FONT_WIDTH {
+                            let px = cursor_x.saturating_add(col as i32);
+                            if px < 0 || px >= surface_w {
+                                continue;
+                            }
+
+                            let mask = 0x80u8 >> col;
+                            let color = if (bits & mask) != 0 {
+                                foreground
+                            } else {
+                                background
+                            };
+                            dst_pixels[row_offset + px as usize] = color;
+                        }
+                    }
+
+                    cursor_x = cursor_x.saturating_add(FONT_WIDTH as i32);
+                }
+            }
+        }
+    }
+
+    true
+}
+
 pub fn draw_circle(cx: i32, cy: i32, radius: i32, rgb: u32) -> bool {
     if radius < 0 {
         return true;
@@ -1584,11 +1672,16 @@ unsafe fn glyph_bits(state: &FramebufferState, ch: u8, row: usize) -> u8 {
         }
     }
 
+    fallback_glyph_bits(ch, row, state.font_height)
+}
+
+#[inline]
+fn fallback_glyph_bits(ch: u8, row: usize, font_height: usize) -> u8 {
     if ch == b' ' {
         0
-    } else if row == 0 || row + 1 == state.font_height {
+    } else if row == 0 || row + 1 == font_height {
         0x7E
-    } else if row == state.font_height / 2 {
+    } else if row == font_height / 2 {
         0x7E
     } else {
         0x42

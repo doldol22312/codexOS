@@ -19,7 +19,8 @@ A bare-metal operating system written from scratch in Rust for x86 (32-bit). Boo
 - **Custom filesystem (CFS1)** -- superblock + directory table + file storage with create, read, write, delete, list, and format operations
 - **PIT timer** -- configurable frequency (default 100 Hz) with uptime tracking
 - **CMOS RTC** -- date and time reads with BCD/binary format handling
-- **Interactive shell** -- 31 built-in commands, command history, tab completion, line editing, and an in-shell text editor
+- **Interactive shell** -- 32 built-in commands, command history, tab completion, line editing, and an in-shell text editor
+- **Desktop shell demo** -- start menu/launcher, app registry, taskbar with open windows + clock, and desktop background layering behind compositor windows
 - **Matrix screensaver** -- because every OS needs one (press any key to exit)
 
 ## Shell Commands
@@ -53,6 +54,7 @@ A bare-metal operating system written from scratch in Rust for x86 (32-bit). Boo
 | `uidemo` | UI dispatcher + widget demo |
 | `uidemo2` | Advanced widget showcase (forms, lists, tree, popup menu) |
 | `windemo` | Multi-window compositor demo |
+| `desktop` | Desktop environment shell demo (taskbar, launcher, app registry) |
 | `color` | Set text colors |
 | `reboot` | Reboot the system |
 | `shutdown` | Power off |

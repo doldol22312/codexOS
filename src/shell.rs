@@ -38,11 +38,11 @@ const MULTDEMO_MAX_ITERATIONS: u32 = 20_000;
 const MULTDEMO_PROGRESS_TICKS: u32 = 20;
 const MULTDEMO_FRAME_TICKS: u32 = 2;
 
-const COMMANDS: [&str; 31] = [
+const COMMANDS: [&str; 32] = [
     "help", "clear", "echo", "info", "disk", "fsinfo", "fsformat", "fsls", "fswrite", "fsdelete",
-    "fscat", "edit", "date", "time", "rtc", "paging", "uptime", "heap", "memtest", "hexdump", "mouse",
-    "matrix", "multdemo", "gfxdemo", "uidemo", "uidemo2", "windemo", "color", "reboot", "shutdown",
-    "panic",
+    "fscat", "edit", "date", "time", "rtc", "paging", "uptime", "heap", "memtest", "hexdump",
+    "mouse", "matrix", "multdemo", "gfxdemo", "uidemo", "uidemo2", "windemo", "desktop", "color",
+    "reboot", "shutdown", "panic",
 ];
 
 struct TextDocument {
@@ -478,6 +478,7 @@ fn execute_line(bytes: &[u8]) {
             shell_println!("  uidemo - UI dispatcher/widgets demo");
             shell_println!("  uidemo2 - advanced widget showcase");
             shell_println!("  windemo - multi-window compositor demo");
+            shell_println!("  desktop - desktop environment shell demo");
             shell_println!("  color - set text colors");
             shell_println!("  reboot - reboot machine");
             shell_println!("  shutdown - power off machine");
@@ -584,6 +585,9 @@ fn execute_line(bytes: &[u8]) {
         }
         "windemo" => {
             handle_windemo_command();
+        }
+        "desktop" => {
+            handle_desktop_command();
         }
         "color" => {
             handle_color_command(parts);
@@ -2137,6 +2141,3189 @@ fn windemo_push_u32<const N: usize>(buffer: &mut [u8; N], len: &mut usize, mut v
     for index in (0..count).rev() {
         windemo_push_bytes(buffer, len, &digits[index..index + 1]);
     }
+}
+
+const DESKTOP_APP_COUNT: usize = 5;
+const DESKTOP_APP_TERMINAL: usize = 0;
+const DESKTOP_APP_FILES: usize = 1;
+const DESKTOP_APP_MONITOR: usize = 2;
+const DESKTOP_APP_NOTES: usize = 3;
+const DESKTOP_APP_PAINT: usize = 4;
+const DESKTOP_MAX_TASK_BUTTONS: usize = ui::MAX_WINDOWS;
+const DESKTOP_PANEL_HEIGHT: i32 = 38;
+const DESKTOP_START_BUTTON_WIDTH: i32 = 88;
+const DESKTOP_CLOCK_WIDTH: i32 = 96;
+const DESKTOP_TASK_BUTTON_GAP: i32 = 6;
+const DESKTOP_TASK_BUTTON_MIN_WIDTH: i32 = 92;
+const DESKTOP_TASK_BUTTON_MAX_WIDTH: i32 = 180;
+const DESKTOP_MENU_WIDTH: i32 = 272;
+const DESKTOP_MENU_HEADER_HEIGHT: i32 = 30;
+const DESKTOP_MENU_ITEM_HEIGHT: i32 = 29;
+const DESKTOP_FRAME_TICKS: u32 = 3;
+const DESKTOP_TERMINAL_MAX_LINES: usize = 128;
+const DESKTOP_TERMINAL_LINE_LEN: usize = 112;
+const DESKTOP_FILES_MAX: usize = 64;
+const DESKTOP_FILES_PREVIEW_MAX: usize = 2048;
+const DESKTOP_STATUS_TEXT_MAX: usize = 96;
+const DESKTOP_NOTES_MAX_LINES: usize = 128;
+const DESKTOP_NOTES_LINE_LEN: usize = 120;
+const DESKTOP_NOTES_FILE: &str = "notes.txt";
+const DESKTOP_NOTES_SAVE_MAX: usize = 8192;
+const DESKTOP_MONITOR_HISTORY: usize = 72;
+const DESKTOP_PAINT_CANVAS_W: usize = 128;
+const DESKTOP_PAINT_CANVAS_H: usize = 80;
+const DESKTOP_PAINT_CANVAS_PIXELS: usize = DESKTOP_PAINT_CANVAS_W * DESKTOP_PAINT_CANVAS_H;
+
+#[derive(Clone, Copy)]
+struct DesktopAppSpec {
+    key: &'static str,
+    name: &'static str,
+    description: &'static str,
+    title: &'static str,
+    rect: ui::Rect,
+    min_width: i32,
+    min_height: i32,
+    background: u32,
+    accent: u32,
+    fill_a: u32,
+    fill_b: u32,
+    stripe: u32,
+}
+
+const DESKTOP_APP_REGISTRY: [DesktopAppSpec; DESKTOP_APP_COUNT] = [
+    DesktopAppSpec {
+        key: "terminal",
+        name: "Terminal",
+        description: "shell session",
+        title: "Terminal",
+        rect: ui::Rect::new(48, 44, 428, 266),
+        min_width: 220,
+        min_height: 150,
+        background: 0x091424,
+        accent: 0x46D2FF,
+        fill_a: 0x0F2A44,
+        fill_b: 0x071325,
+        stripe: 0x204D73,
+    },
+    DesktopAppSpec {
+        key: "files",
+        name: "Files",
+        description: "project browser",
+        title: "File Browser",
+        rect: ui::Rect::new(152, 74, 416, 252),
+        min_width: 220,
+        min_height: 150,
+        background: 0x111E12,
+        accent: 0x57D76B,
+        fill_a: 0x1A331D,
+        fill_b: 0x0D1C0F,
+        stripe: 0x2D6A36,
+    },
+    DesktopAppSpec {
+        key: "monitor",
+        name: "Monitor",
+        description: "system metrics",
+        title: "System Monitor",
+        rect: ui::Rect::new(236, 92, 392, 246),
+        min_width: 220,
+        min_height: 150,
+        background: 0x1A140C,
+        accent: 0xFFBF55,
+        fill_a: 0x382610,
+        fill_b: 0x1A1208,
+        stripe: 0x8D5E20,
+    },
+    DesktopAppSpec {
+        key: "notes",
+        name: "Notes",
+        description: "quick notes",
+        title: "Notes",
+        rect: ui::Rect::new(92, 152, 360, 236),
+        min_width: 220,
+        min_height: 150,
+        background: 0x1F101F,
+        accent: 0xE58BFF,
+        fill_a: 0x331A35,
+        fill_b: 0x1A0D1B,
+        stripe: 0x7E4390,
+    },
+    DesktopAppSpec {
+        key: "paint",
+        name: "Paint",
+        description: "pixel board",
+        title: "Pixel Paint",
+        rect: ui::Rect::new(202, 142, 382, 236),
+        min_width: 220,
+        min_height: 150,
+        background: 0x100F26,
+        accent: 0x8E9BFF,
+        fill_a: 0x1C2253,
+        fill_b: 0x0C1030,
+        stripe: 0x384FA6,
+    },
+];
+
+#[derive(Clone, Copy)]
+struct DesktopTaskButton {
+    window_id: ui::WindowId,
+    title: &'static str,
+    rect: ui::Rect,
+    focused: bool,
+    minimized: bool,
+}
+
+const EMPTY_DESKTOP_TASK_BUTTON: DesktopTaskButton = DesktopTaskButton {
+    window_id: 0,
+    title: "",
+    rect: ui::Rect::new(0, 0, 0, 0),
+    focused: false,
+    minimized: false,
+};
+
+#[derive(Clone, Copy)]
+struct DesktopLauncherItem {
+    app_index: usize,
+    rect: ui::Rect,
+    running: bool,
+}
+
+const EMPTY_DESKTOP_LAUNCHER_ITEM: DesktopLauncherItem = DesktopLauncherItem {
+    app_index: 0,
+    rect: ui::Rect::new(0, 0, 0, 0),
+    running: false,
+};
+
+struct DesktopLayout {
+    desktop_bounds: ui::Rect,
+    panel_rect: ui::Rect,
+    start_button: ui::Rect,
+    clock_rect: ui::Rect,
+    task_buttons: [DesktopTaskButton; DESKTOP_MAX_TASK_BUTTONS],
+    task_button_count: usize,
+    launcher_rect: ui::Rect,
+    launcher_items: [DesktopLauncherItem; DESKTOP_APP_COUNT],
+    launcher_item_count: usize,
+}
+
+#[derive(Clone, Copy)]
+struct DesktopClock {
+    hour: u8,
+    minute: u8,
+    second: u8,
+}
+
+fn handle_desktop_command() {
+    let Some((fb_width, fb_height)) = vga::framebuffer_resolution() else {
+        shell_println!("desktop requires VBE/framebuffer mode");
+        return;
+    };
+
+    let width = fb_width.min(i32::MAX as usize) as i32;
+    let height = fb_height.min(i32::MAX as usize) as i32;
+    if width <= 0 || height <= 0 {
+        shell_println!("desktop: invalid framebuffer size");
+        return;
+    }
+
+    if width < 760 || height < 460 {
+        shell_println!("desktop: framebuffer too small (need at least 760x460)");
+        return;
+    }
+
+    shell_println!("desktop: taskbar + launcher shell (Shift+Q exits, Shift+S toggles start menu)");
+    for _ in 0..512 {
+        if input::pop_event().is_none() {
+            break;
+        }
+    }
+
+    let panel_height = DESKTOP_PANEL_HEIGHT.min((height / 2).max(30));
+    let desktop_bounds = ui::Rect::new(0, 0, width, height.saturating_sub(panel_height).max(1));
+    let mut manager = ui::WindowManager::new(0x081423);
+    let mut running_windows = [None; DESKTOP_APP_COUNT];
+    let mut launch_serial = 0u32;
+
+    let _ = desktop_launch_app(
+        &mut manager,
+        &mut running_windows,
+        DESKTOP_APP_TERMINAL,
+        &mut launch_serial,
+        desktop_bounds,
+    );
+    let _ = desktop_launch_app(
+        &mut manager,
+        &mut running_windows,
+        DESKTOP_APP_MONITOR,
+        &mut launch_serial,
+        desktop_bounds,
+    );
+
+    let mut launcher_open = false;
+    let mut layout = desktop_compute_layout(&manager, width, height, launcher_open, &running_windows);
+    let mut last_clock_second = desktop_clock_second_key();
+    let mut last_frame_tick = timer::ticks().wrapping_sub(DESKTOP_FRAME_TICKS);
+
+    let start_tick = timer::ticks();
+    let mut apps = DesktopApps::new(start_tick);
+    if running_windows[DESKTOP_APP_TERMINAL].is_some() {
+        apps.on_app_launched(DESKTOP_APP_TERMINAL);
+    }
+    if running_windows[DESKTOP_APP_MONITOR].is_some() {
+        apps.on_app_launched(DESKTOP_APP_MONITOR);
+    }
+
+    desktop_paint_running_windows(&mut manager, &running_windows, &mut apps, start_tick);
+    desktop_draw_scene(&manager, &layout, launcher_open, start_tick);
+
+    'desktop: loop {
+        let mut redraw = false;
+        let mut processed = 0usize;
+
+        for _ in 0..128 {
+            let Some(event) = input::pop_event() else {
+                break;
+            };
+            processed += 1;
+
+            let mut consumed = false;
+
+            if let InputEvent::MouseDown {
+                button: MouseButton::Left,
+                x,
+                y,
+            } = event
+            {
+                layout = desktop_compute_layout(&manager, width, height, launcher_open, &running_windows);
+
+                if layout.start_button.contains(x, y) {
+                    launcher_open = !launcher_open;
+                    redraw = true;
+                    consumed = true;
+                } else if let Some(window_id) = desktop_hit_task_button(&layout, x, y) {
+                    let _ = manager.activate_window(window_id);
+                    launcher_open = false;
+                    redraw = true;
+                    consumed = true;
+                } else if launcher_open {
+                    if let Some(app_index) = desktop_hit_launcher_item(&layout, x, y) {
+                        let launched = desktop_launch_app(
+                            &mut manager,
+                            &mut running_windows,
+                            app_index,
+                            &mut launch_serial,
+                            desktop_bounds,
+                        );
+                        launcher_open = false;
+                        if launched {
+                            apps.on_app_launched(app_index);
+                            redraw = true;
+                        } else {
+                            redraw = true;
+                            shell_println!(
+                                "desktop: failed to launch {}",
+                                DESKTOP_APP_REGISTRY[app_index].name
+                            );
+                        }
+                        consumed = true;
+                    } else if layout.launcher_rect.contains(x, y) {
+                        consumed = true;
+                    } else {
+                        launcher_open = false;
+                        redraw = true;
+                    }
+                }
+            }
+
+            if !consumed {
+                let response = manager.handle_event(event, desktop_bounds);
+                if response.redraw {
+                    redraw = true;
+                }
+                if let Some(closed_id) = response.closed {
+                    desktop_unregister_closed_window(&mut running_windows, closed_id);
+                    apps.on_window_closed(closed_id);
+                    redraw = true;
+                }
+
+                let app_redraw = desktop_handle_app_event(
+                    &mut apps,
+                    &manager,
+                    &running_windows,
+                    event,
+                    timer::ticks(),
+                );
+                if app_redraw {
+                    redraw = true;
+                }
+
+                if !app_redraw {
+                    match event {
+                        InputEvent::KeyPress {
+                            key: KeyEvent::Char('Q'),
+                        } => break 'desktop,
+                        InputEvent::KeyPress {
+                            key: KeyEvent::Char('S'),
+                        } => {
+                            launcher_open = !launcher_open;
+                            redraw = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let clock_second = desktop_clock_second_key();
+        if clock_second != last_clock_second {
+            last_clock_second = clock_second;
+            redraw = true;
+        }
+
+        let now = timer::ticks();
+        let frame_due = now.wrapping_sub(last_frame_tick) >= DESKTOP_FRAME_TICKS;
+        if frame_due {
+            last_frame_tick = now;
+            redraw = true;
+        }
+
+        if redraw {
+            let tick = if frame_due { now } else { timer::ticks() };
+            desktop_paint_running_windows(&mut manager, &running_windows, &mut apps, tick);
+            layout = desktop_compute_layout(&manager, width, height, launcher_open, &running_windows);
+            desktop_draw_scene(&manager, &layout, launcher_open, tick);
+        }
+
+        if processed == 0 {
+            unsafe {
+                core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
+
+    vga::clear_screen();
+}
+
+fn desktop_launch_app(
+    manager: &mut ui::WindowManager,
+    running_windows: &mut [Option<ui::WindowId>; DESKTOP_APP_COUNT],
+    app_index: usize,
+    launch_serial: &mut u32,
+    desktop_bounds: ui::Rect,
+) -> bool {
+    if app_index >= DESKTOP_APP_REGISTRY.len() {
+        return false;
+    }
+
+    if let Some(existing_id) = running_windows[app_index] {
+        if manager.focus_window(existing_id) {
+            return true;
+        }
+        running_windows[app_index] = None;
+    }
+
+    let app = DESKTOP_APP_REGISTRY[app_index];
+    let mut rect = app.rect;
+    let offset = ((*launch_serial % 6) as i32).saturating_mul(18);
+    rect.x = rect.x.saturating_add(offset);
+    rect.y = rect.y.saturating_add(offset / 2);
+    rect = desktop_clamp_window_rect(rect, desktop_bounds, app.min_width, app.min_height);
+
+    let spec = ui::WindowSpec {
+        title: app.title,
+        rect,
+        min_width: app.min_width,
+        min_height: app.min_height,
+        background: app.background,
+        accent: app.accent,
+    };
+
+    let Ok(id) = manager.add_window(spec) else {
+        return false;
+    };
+
+    running_windows[app_index] = Some(id);
+    *launch_serial = launch_serial.wrapping_add(1);
+    true
+}
+
+fn desktop_clamp_window_rect(
+    mut rect: ui::Rect,
+    desktop_bounds: ui::Rect,
+    min_width: i32,
+    min_height: i32,
+) -> ui::Rect {
+    let hard_min_w = min_width.max(120);
+    let hard_min_h = min_height.max(96);
+    let max_w = desktop_bounds.width.saturating_sub(12).max(hard_min_w);
+    let max_h = desktop_bounds.height.saturating_sub(12).max(hard_min_h);
+
+    rect.width = rect.width.max(hard_min_w).min(max_w);
+    rect.height = rect.height.max(hard_min_h).min(max_h);
+
+    let min_x = desktop_bounds.x.saturating_add(6);
+    let max_x = desktop_bounds
+        .x
+        .saturating_add(desktop_bounds.width)
+        .saturating_sub(rect.width)
+        .saturating_sub(6);
+    if max_x >= min_x {
+        rect.x = rect.x.clamp(min_x, max_x);
+    } else {
+        rect.x = desktop_bounds.x;
+    }
+
+    let min_y = desktop_bounds.y.saturating_add(6);
+    let max_y = desktop_bounds
+        .y
+        .saturating_add(desktop_bounds.height)
+        .saturating_sub(rect.height)
+        .saturating_sub(6);
+    if max_y >= min_y {
+        rect.y = rect.y.clamp(min_y, max_y);
+    } else {
+        rect.y = desktop_bounds.y;
+    }
+
+    rect
+}
+
+fn desktop_unregister_closed_window(
+    running_windows: &mut [Option<ui::WindowId>; DESKTOP_APP_COUNT],
+    closed: ui::WindowId,
+) {
+    for window in running_windows.iter_mut() {
+        if *window == Some(closed) {
+            *window = None;
+        }
+    }
+}
+
+fn desktop_compute_layout(
+    manager: &ui::WindowManager,
+    width: i32,
+    height: i32,
+    launcher_open: bool,
+    running_windows: &[Option<ui::WindowId>; DESKTOP_APP_COUNT],
+) -> DesktopLayout {
+    let panel_height = DESKTOP_PANEL_HEIGHT.min((height / 2).max(30));
+    let panel_y = height.saturating_sub(panel_height);
+    let desktop_bounds = ui::Rect::new(0, 0, width, panel_y.max(1));
+    let panel_rect = ui::Rect::new(0, panel_y, width, panel_height);
+    let button_height = panel_height.saturating_sub(12).max(1);
+    let start_button = ui::Rect::new(8, panel_y + 6, DESKTOP_START_BUTTON_WIDTH, button_height);
+    let clock_x = width.saturating_sub(DESKTOP_CLOCK_WIDTH + 8).max(8);
+    let clock_rect = ui::Rect::new(clock_x, panel_y + 6, DESKTOP_CLOCK_WIDTH, button_height);
+
+    let mut layout = DesktopLayout {
+        desktop_bounds,
+        panel_rect,
+        start_button,
+        clock_rect,
+        task_buttons: [EMPTY_DESKTOP_TASK_BUTTON; DESKTOP_MAX_TASK_BUTTONS],
+        task_button_count: 0,
+        launcher_rect: ui::Rect::new(0, 0, 0, 0),
+        launcher_items: [EMPTY_DESKTOP_LAUNCHER_ITEM; DESKTOP_APP_COUNT],
+        launcher_item_count: 0,
+    };
+
+    let mut summaries = [ui::WindowSummary::default(); DESKTOP_MAX_TASK_BUTTONS];
+    let summary_count = manager.window_summaries(&mut summaries);
+
+    let task_x = start_button
+        .x
+        .saturating_add(start_button.width)
+        .saturating_add(8);
+    let task_end = clock_rect.x.saturating_sub(8);
+    let task_available = task_end.saturating_sub(task_x);
+    if task_available > DESKTOP_TASK_BUTTON_MIN_WIDTH && summary_count > 0 {
+        let mut visible = summary_count.min(DESKTOP_MAX_TASK_BUTTONS);
+        while visible > 0 {
+            let needed = (visible as i32).saturating_mul(DESKTOP_TASK_BUTTON_MIN_WIDTH)
+                + (visible.saturating_sub(1) as i32).saturating_mul(DESKTOP_TASK_BUTTON_GAP);
+            if needed <= task_available {
+                break;
+            }
+            visible -= 1;
+        }
+
+        if visible > 0 {
+            let start_index = summary_count.saturating_sub(visible);
+            let gap_total = (visible.saturating_sub(1) as i32).saturating_mul(DESKTOP_TASK_BUTTON_GAP);
+            let button_width = ((task_available.saturating_sub(gap_total)) / (visible as i32))
+                .clamp(DESKTOP_TASK_BUTTON_MIN_WIDTH, DESKTOP_TASK_BUTTON_MAX_WIDTH);
+            let mut x = task_x;
+
+            for offset in 0..visible {
+                if x.saturating_add(button_width) > task_end {
+                    break;
+                }
+                let summary = summaries[start_index + offset];
+                layout.task_buttons[layout.task_button_count] = DesktopTaskButton {
+                    window_id: summary.id,
+                    title: summary.title,
+                    rect: ui::Rect::new(x, panel_y + 6, button_width, button_height),
+                    focused: summary.focused,
+                    minimized: summary.minimized,
+                };
+                layout.task_button_count += 1;
+                x = x.saturating_add(button_width + DESKTOP_TASK_BUTTON_GAP);
+            }
+        }
+    }
+
+    if launcher_open {
+        let menu_width = DESKTOP_MENU_WIDTH.min(width.saturating_sub(16)).max(180);
+        let menu_height = DESKTOP_MENU_HEADER_HEIGHT
+            .saturating_add((DESKTOP_APP_COUNT as i32).saturating_mul(DESKTOP_MENU_ITEM_HEIGHT))
+            .saturating_add(8);
+        let menu_x = start_button
+            .x
+            .min(width.saturating_sub(menu_width + 8))
+            .max(8);
+        let menu_y = panel_y.saturating_sub(menu_height + 8).max(8);
+        layout.launcher_rect = ui::Rect::new(menu_x, menu_y, menu_width, menu_height);
+
+        let mut item_y = menu_y.saturating_add(DESKTOP_MENU_HEADER_HEIGHT);
+        let item_x = menu_x.saturating_add(6);
+        let item_w = menu_width.saturating_sub(12).max(1);
+        for index in 0..DESKTOP_APP_COUNT {
+            layout.launcher_items[index] = DesktopLauncherItem {
+                app_index: index,
+                rect: ui::Rect::new(
+                    item_x,
+                    item_y,
+                    item_w,
+                    DESKTOP_MENU_ITEM_HEIGHT.saturating_sub(2).max(1),
+                ),
+                running: running_windows[index].is_some(),
+            };
+            layout.launcher_item_count += 1;
+            item_y = item_y.saturating_add(DESKTOP_MENU_ITEM_HEIGHT);
+        }
+    }
+
+    layout
+}
+
+fn desktop_hit_task_button(layout: &DesktopLayout, x: i32, y: i32) -> Option<ui::WindowId> {
+    for button in layout.task_buttons[..layout.task_button_count].iter().rev() {
+        if button.rect.contains(x, y) {
+            return Some(button.window_id);
+        }
+    }
+    None
+}
+
+fn desktop_hit_launcher_item(layout: &DesktopLayout, x: i32, y: i32) -> Option<usize> {
+    for item in layout.launcher_items[..layout.launcher_item_count].iter() {
+        if item.rect.contains(x, y) {
+            return Some(item.app_index);
+        }
+    }
+    None
+}
+
+const DESKTOP_TEXT_SCRATCH: usize = 192;
+const DESKTOP_PAINT_PALETTE_COUNT: usize = 10;
+const DESKTOP_PAINT_PALETTE: [u32; DESKTOP_PAINT_PALETTE_COUNT] = [
+    0x111111, 0xF8F8F8, 0xE43F5A, 0xF9A03F, 0xFFE66D, 0x2EC4B6, 0x3A86FF, 0x6A4C93, 0x8AC926,
+    0xFF8FAB,
+];
+const EMPTY_DESKTOP_RECT: ui::Rect = ui::Rect::new(0, 0, 0, 0);
+
+#[derive(Clone, Copy)]
+struct DesktopFilesLayout {
+    refresh_button: ui::Rect,
+    delete_button: ui::Rect,
+    list_rect: ui::Rect,
+    preview_rect: ui::Rect,
+    status_rect: ui::Rect,
+}
+
+#[derive(Clone, Copy)]
+struct DesktopNotesLayout {
+    save_button: ui::Rect,
+    load_button: ui::Rect,
+    clear_button: ui::Rect,
+    editor_rect: ui::Rect,
+    status_rect: ui::Rect,
+}
+
+#[derive(Clone, Copy)]
+struct DesktopPaintLayout {
+    palette: [ui::Rect; DESKTOP_PAINT_PALETTE_COUNT],
+    clear_button: ui::Rect,
+    canvas_rect: ui::Rect,
+    scale: i32,
+}
+
+struct DesktopApps {
+    terminal: DesktopTerminalState,
+    files: DesktopFilesState,
+    monitor: DesktopMonitorState,
+    notes: DesktopNotesState,
+    paint: DesktopPaintState,
+}
+
+impl DesktopApps {
+    fn new(start_tick: u32) -> Self {
+        Self {
+            terminal: DesktopTerminalState::new(),
+            files: DesktopFilesState::new(),
+            monitor: DesktopMonitorState::new(start_tick),
+            notes: DesktopNotesState::new(),
+            paint: DesktopPaintState::new(),
+        }
+    }
+
+    fn on_app_launched(&mut self, app_index: usize) {
+        match app_index {
+            DESKTOP_APP_TERMINAL => self.terminal.push_line(b"session attached"),
+            DESKTOP_APP_FILES => self.files.refresh(),
+            DESKTOP_APP_MONITOR => self.monitor.reset(),
+            DESKTOP_APP_NOTES => {}
+            DESKTOP_APP_PAINT => {
+                let _ = self.paint.end_stroke();
+            }
+            _ => {}
+        }
+    }
+
+    fn on_window_closed(&mut self, id: ui::WindowId) {
+        self.paint.on_window_closed(id);
+    }
+}
+
+fn desktop_window_app_index(
+    running_windows: &[Option<ui::WindowId>; DESKTOP_APP_COUNT],
+    id: ui::WindowId,
+) -> Option<usize> {
+    for (index, window_id) in running_windows.iter().enumerate() {
+        if *window_id == Some(id) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn desktop_handle_app_event(
+    apps: &mut DesktopApps,
+    manager: &ui::WindowManager,
+    running_windows: &[Option<ui::WindowId>; DESKTOP_APP_COUNT],
+    event: InputEvent,
+    _tick: u32,
+) -> bool {
+    let mut redraw = false;
+
+    if matches!(
+        event,
+        InputEvent::MouseUp {
+            button: MouseButton::Left,
+            ..
+        }
+    ) {
+        redraw |= apps.paint.end_stroke();
+    }
+
+    let Some(focused_id) = manager.focused_window() else {
+        return redraw;
+    };
+    let Some(app_index) = desktop_window_app_index(running_windows, focused_id) else {
+        return redraw;
+    };
+    let Some(client_rect) = manager.window_client_rect(focused_id) else {
+        return redraw;
+    };
+
+    match app_index {
+        DESKTOP_APP_TERMINAL => {
+            if let InputEvent::KeyPress { key } = event {
+                redraw |= apps.terminal.handle_key(key);
+            }
+        }
+        DESKTOP_APP_FILES => {
+            redraw |= apps.files.handle_event(event, client_rect);
+        }
+        DESKTOP_APP_MONITOR => {
+            if let InputEvent::KeyPress { key } = event {
+                redraw |= apps.monitor.handle_key(key);
+            }
+        }
+        DESKTOP_APP_NOTES => {
+            redraw |= apps.notes.handle_event(event, client_rect);
+        }
+        DESKTOP_APP_PAINT => {
+            redraw |= apps.paint.handle_event(event, focused_id, client_rect);
+        }
+        _ => {}
+    }
+
+    redraw
+}
+
+fn desktop_files_layout(width: usize, height: usize) -> DesktopFilesLayout {
+    let w = width as i32;
+    let h = height as i32;
+    let button_h = 18;
+    let font_h = desktop_font_height().max(8);
+    let status_h = (font_h + 8).max(18);
+    let refresh_button = ui::Rect::new(8, 6, 72, button_h);
+    let delete_button = ui::Rect::new(86, 6, 72, button_h);
+
+    let list_y = 30;
+    let status_y = h.saturating_sub(status_h + 6).max(list_y + 2);
+    let status_rect = ui::Rect::new(8, status_y, w.saturating_sub(16).max(1), status_h);
+    let list_h = status_y.saturating_sub(list_y + 6).max(1);
+    let list_w = ((w / 2).saturating_sub(12)).max(90);
+    let list_rect = ui::Rect::new(8, list_y, list_w, list_h);
+
+    let preview_x = list_rect.x.saturating_add(list_rect.width).saturating_add(8);
+    let preview_w = w.saturating_sub(preview_x + 8).max(1);
+    let preview_rect = ui::Rect::new(preview_x, list_y, preview_w, list_h);
+
+    DesktopFilesLayout {
+        refresh_button,
+        delete_button,
+        list_rect,
+        preview_rect,
+        status_rect,
+    }
+}
+
+fn desktop_notes_layout(width: usize, height: usize) -> DesktopNotesLayout {
+    let w = width as i32;
+    let h = height as i32;
+    let button_h = 18;
+    let font_h = desktop_font_height().max(8);
+    let status_h = (font_h + 8).max(18);
+    let save_button = ui::Rect::new(8, 6, 56, button_h);
+    let load_button = ui::Rect::new(70, 6, 56, button_h);
+    let clear_button = ui::Rect::new(132, 6, 56, button_h);
+    let editor_y = 34;
+    let status_y = h.saturating_sub(status_h + 6).max(editor_y + 2);
+    let status_rect = ui::Rect::new(8, status_y, w.saturating_sub(16).max(1), status_h);
+    let editor_rect = ui::Rect::new(
+        8,
+        editor_y,
+        w.saturating_sub(16).max(1),
+        status_y.saturating_sub(editor_y + 6).max(1),
+    );
+
+    DesktopNotesLayout {
+        save_button,
+        load_button,
+        clear_button,
+        editor_rect,
+        status_rect,
+    }
+}
+
+fn desktop_paint_layout(width: usize, height: usize) -> DesktopPaintLayout {
+    let mut palette = [EMPTY_DESKTOP_RECT; DESKTOP_PAINT_PALETTE_COUNT];
+    let swatch_size = 16;
+    let swatch_gap = 4;
+    let mut swatch_x = 8;
+    for slot in 0..DESKTOP_PAINT_PALETTE_COUNT {
+        palette[slot] = ui::Rect::new(swatch_x, 6, swatch_size, swatch_size);
+        swatch_x = swatch_x.saturating_add(swatch_size + swatch_gap);
+    }
+
+    let clear_button = ui::Rect::new((width as i32).saturating_sub(68).max(8), 6, 60, 18);
+    let available_w = (width as i32).saturating_sub(16).max(1);
+    let available_h = (height as i32).saturating_sub(36).max(1);
+    let scale_x = (available_w / DESKTOP_PAINT_CANVAS_W as i32).max(1);
+    let scale_y = (available_h / DESKTOP_PAINT_CANVAS_H as i32).max(1);
+    let scale = scale_x.min(scale_y).max(1);
+
+    let canvas_w = (DESKTOP_PAINT_CANVAS_W as i32).saturating_mul(scale);
+    let canvas_h = (DESKTOP_PAINT_CANVAS_H as i32).saturating_mul(scale);
+    let canvas_x = ((width as i32).saturating_sub(canvas_w) / 2).max(8);
+    let canvas_y = 30
+        + ((height as i32)
+            .saturating_sub(30)
+            .saturating_sub(canvas_h)
+            .max(0)
+            / 2);
+
+    DesktopPaintLayout {
+        palette,
+        clear_button,
+        canvas_rect: ui::Rect::new(canvas_x, canvas_y, canvas_w, canvas_h),
+        scale,
+    }
+}
+
+fn desktop_mouse_local(event: InputEvent, rect: ui::Rect) -> Option<(i32, i32)> {
+    match event {
+        InputEvent::MouseDown { x, y, .. }
+        | InputEvent::MouseUp { x, y, .. }
+        | InputEvent::MouseClick { x, y, .. }
+        | InputEvent::MouseMove { x, y, .. } => {
+            if rect.contains(x, y) {
+                Some((x.saturating_sub(rect.x), y.saturating_sub(rect.y)))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn desktop_font_height() -> i32 {
+    vga::font_metrics().map_or(16, |(_, h)| h.max(1)) as i32
+}
+
+fn desktop_draw_text(pixels: &mut [u32], width: usize, height: usize, x: i32, y: i32, text: &str, fg: u32, bg: u32) {
+    let _ = vga::draw_text_bitmap(pixels, width, height, width, x, y, text, fg, bg);
+}
+
+fn desktop_draw_text_bytes(
+    pixels: &mut [u32],
+    width: usize,
+    height: usize,
+    x: i32,
+    y: i32,
+    bytes: &[u8],
+    fg: u32,
+    bg: u32,
+) {
+    if let Ok(text) = str::from_utf8(bytes) {
+        desktop_draw_text(pixels, width, height, x, y, text, fg, bg);
+        return;
+    }
+
+    let mut sanitized = [0u8; DESKTOP_TEXT_SCRATCH];
+    let copy_len = bytes.len().min(sanitized.len());
+    for (index, byte) in bytes.iter().copied().take(copy_len).enumerate() {
+        sanitized[index] = sanitize_editor_byte(byte);
+    }
+    if let Ok(text) = str::from_utf8(&sanitized[..copy_len]) {
+        desktop_draw_text(pixels, width, height, x, y, text, fg, bg);
+    }
+}
+
+fn desktop_draw_border(
+    pixels: &mut [u32],
+    width: usize,
+    height: usize,
+    rect: ui::Rect,
+    color: u32,
+) {
+    if rect.width <= 0 || rect.height <= 0 {
+        return;
+    }
+    multdemo_fill_rect(pixels, width, height, rect.x, rect.y, rect.width, 1, color);
+    multdemo_fill_rect(
+        pixels,
+        width,
+        height,
+        rect.x,
+        rect.y.saturating_add(rect.height).saturating_sub(1),
+        rect.width,
+        1,
+        color,
+    );
+    multdemo_fill_rect(pixels, width, height, rect.x, rect.y, 1, rect.height, color);
+    multdemo_fill_rect(
+        pixels,
+        width,
+        height,
+        rect.x.saturating_add(rect.width).saturating_sub(1),
+        rect.y,
+        1,
+        rect.height,
+        color,
+    );
+}
+
+fn desktop_set_message<const N: usize>(buffer: &mut [u8; N], len: &mut usize, text: &str) {
+    *len = 0;
+    for byte in text.bytes() {
+        if *len >= N {
+            break;
+        }
+        buffer[*len] = sanitize_editor_byte(byte);
+        *len += 1;
+    }
+}
+
+fn desktop_copy_sanitized_ascii(dst: &mut [u8], src: &[u8]) -> usize {
+    let mut written = 0usize;
+    for byte in src.iter().copied() {
+        if written >= dst.len() {
+            break;
+        }
+        dst[written] = match byte {
+            b'\n' | b'\r' | b'\t' => b' ',
+            0x20..=0x7E => byte,
+            _ => b'.',
+        };
+        written += 1;
+    }
+    written
+}
+
+struct DesktopTerminalState {
+    lines: [[u8; DESKTOP_TERMINAL_LINE_LEN]; DESKTOP_TERMINAL_MAX_LINES],
+    line_lens: [usize; DESKTOP_TERMINAL_MAX_LINES],
+    head: usize,
+    count: usize,
+    input: [u8; DESKTOP_TERMINAL_LINE_LEN],
+    input_len: usize,
+}
+
+impl DesktopTerminalState {
+    fn new() -> Self {
+        let mut state = Self {
+            lines: [[0; DESKTOP_TERMINAL_LINE_LEN]; DESKTOP_TERMINAL_MAX_LINES],
+            line_lens: [0; DESKTOP_TERMINAL_MAX_LINES],
+            head: 0,
+            count: 0,
+            input: [0; DESKTOP_TERMINAL_LINE_LEN],
+            input_len: 0,
+        };
+        state.push_line(b"codexOS desktop terminal");
+        state.push_line(b"commands: help clear echo time uptime heap fsls fscat");
+        state
+    }
+
+    fn oldest_index(&self) -> usize {
+        if self.count < DESKTOP_TERMINAL_MAX_LINES {
+            0
+        } else {
+            self.head
+        }
+    }
+
+    fn line_at(&self, logical_index: usize) -> Option<&[u8]> {
+        if logical_index >= self.count {
+            return None;
+        }
+        let index = (self.oldest_index() + logical_index) % DESKTOP_TERMINAL_MAX_LINES;
+        Some(&self.lines[index][..self.line_lens[index]])
+    }
+
+    fn clear_history(&mut self) {
+        self.count = 0;
+        self.head = 0;
+    }
+
+    fn push_line(&mut self, bytes: &[u8]) {
+        let slot = self.head;
+        let mut len = 0usize;
+        for byte in bytes.iter().copied() {
+            if len >= DESKTOP_TERMINAL_LINE_LEN {
+                break;
+            }
+            self.lines[slot][len] = sanitize_editor_byte(byte);
+            len += 1;
+        }
+        self.line_lens[slot] = len;
+        self.head = (self.head + 1) % DESKTOP_TERMINAL_MAX_LINES;
+        if self.count < DESKTOP_TERMINAL_MAX_LINES {
+            self.count += 1;
+        }
+    }
+
+    fn push_prompt_line(&mut self) {
+        let mut line = [0u8; DESKTOP_TERMINAL_LINE_LEN];
+        let mut len = 0usize;
+        windemo_push_bytes(&mut line, &mut len, b"> ");
+        windemo_push_bytes(&mut line, &mut len, &self.input[..self.input_len]);
+        self.push_line(&line[..len]);
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> bool {
+        match key {
+            KeyEvent::Char('\n') => {
+                self.submit();
+                true
+            }
+            KeyEvent::Char('\x08') => {
+                if self.input_len == 0 {
+                    return false;
+                }
+                self.input_len -= 1;
+                true
+            }
+            KeyEvent::Char(ch) if is_printable(ch) => {
+                if self.input_len >= self.input.len() {
+                    return false;
+                }
+                self.input[self.input_len] = ch as u8;
+                self.input_len += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn submit(&mut self) {
+        self.push_prompt_line();
+
+        let mut command = [0u8; DESKTOP_TERMINAL_LINE_LEN];
+        let command_len = self.input_len;
+        command[..command_len].copy_from_slice(&self.input[..command_len]);
+        self.input_len = 0;
+
+        if command_len == 0 {
+            return;
+        }
+
+        let command_text = str::from_utf8(&command[..command_len]).unwrap_or("");
+        let mut parts = command_text.split_whitespace();
+        let Some(token) = parts.next() else {
+            return;
+        };
+
+        match token {
+            "help" => {
+                self.push_line(b"help clear echo time uptime heap fsls fscat");
+            }
+            "clear" => {
+                self.clear_history();
+                self.push_line(b"terminal cleared");
+            }
+            "echo" => {
+                let rest = command_text
+                    .split_once(' ')
+                    .map(|(_, tail)| tail)
+                    .unwrap_or("");
+                if rest.is_empty() {
+                    self.push_line(b"(empty)");
+                } else {
+                    self.push_line(rest.as_bytes());
+                }
+            }
+            "time" => {
+                let clock = desktop_clock_now();
+                let mut line = [0u8; DESKTOP_TERMINAL_LINE_LEN];
+                let mut len = 0usize;
+                windemo_push_bytes(&mut line, &mut len, b"time ");
+                desktop_push_two_digits(&mut line, &mut len, clock.hour);
+                windemo_push_bytes(&mut line, &mut len, b":");
+                desktop_push_two_digits(&mut line, &mut len, clock.minute);
+                windemo_push_bytes(&mut line, &mut len, b":");
+                desktop_push_two_digits(&mut line, &mut len, clock.second);
+                self.push_line(&line[..len]);
+            }
+            "uptime" => {
+                let up = timer::uptime();
+                let mut line = [0u8; DESKTOP_TERMINAL_LINE_LEN];
+                let mut len = 0usize;
+                windemo_push_bytes(&mut line, &mut len, b"uptime ");
+                windemo_push_u32(&mut line, &mut len, up.seconds.min(u32::MAX as u64) as u32);
+                windemo_push_bytes(&mut line, &mut len, b".");
+                desktop_push_two_digits(&mut line, &mut len, (up.millis / 10) as u8);
+                windemo_push_bytes(&mut line, &mut len, b"s");
+                self.push_line(&line[..len]);
+            }
+            "heap" => {
+                let heap = allocator::stats();
+                let mut line = [0u8; DESKTOP_TERMINAL_LINE_LEN];
+                let mut len = 0usize;
+                windemo_push_bytes(&mut line, &mut len, b"heap used ");
+                windemo_push_u32(&mut line, &mut len, heap.used.min(u32::MAX as usize) as u32);
+                windemo_push_bytes(&mut line, &mut len, b" / ");
+                windemo_push_u32(&mut line, &mut len, heap.total.min(u32::MAX as usize) as u32);
+                windemo_push_bytes(&mut line, &mut len, b" bytes");
+                self.push_line(&line[..len]);
+            }
+            "fsls" => {
+                let mut files = [fs::FileInfo::empty(); 16];
+                match fs::list(&mut files) {
+                    Ok(count) => {
+                        if count == 0 {
+                            self.push_line(b"no files");
+                        } else {
+                            for file in files.iter().take(count) {
+                                let mut line = [0u8; DESKTOP_TERMINAL_LINE_LEN];
+                                let mut len = 0usize;
+                                windemo_push_bytes(&mut line, &mut len, file.name_str().as_bytes());
+                                windemo_push_bytes(&mut line, &mut len, b" (");
+                                windemo_push_u32(&mut line, &mut len, file.size_bytes);
+                                windemo_push_bytes(&mut line, &mut len, b"b)");
+                                self.push_line(&line[..len]);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let mut line = [0u8; DESKTOP_TERMINAL_LINE_LEN];
+                        let mut len = 0usize;
+                        windemo_push_bytes(&mut line, &mut len, b"fsls: ");
+                        windemo_push_bytes(&mut line, &mut len, error.as_str().as_bytes());
+                        self.push_line(&line[..len]);
+                    }
+                }
+            }
+            "fscat" => {
+                let Some(name) = parts.next() else {
+                    self.push_line(b"usage: fscat <name>");
+                    return;
+                };
+
+                let mut buffer = [0u8; 256];
+                match fs::read_file(name, &mut buffer) {
+                    Ok(result) => {
+                        if result.copied_size == 0 {
+                            self.push_line(b"<empty>");
+                            return;
+                        }
+
+                        let mut offset = 0usize;
+                        for _ in 0..3 {
+                            if offset >= result.copied_size {
+                                break;
+                            }
+                            let mut line = [0u8; DESKTOP_TERMINAL_LINE_LEN];
+                            let mut len = 0usize;
+                            while offset < result.copied_size && len < line.len() {
+                                let byte = buffer[offset];
+                                offset += 1;
+                                if byte == b'\n' || byte == b'\r' {
+                                    break;
+                                }
+                                line[len] = sanitize_editor_byte(byte);
+                                len += 1;
+                            }
+                            self.push_line(&line[..len]);
+                        }
+
+                        if result.total_size > result.copied_size || offset < result.copied_size {
+                            self.push_line(b"...");
+                        }
+                    }
+                    Err(error) => {
+                        let mut line = [0u8; DESKTOP_TERMINAL_LINE_LEN];
+                        let mut len = 0usize;
+                        windemo_push_bytes(&mut line, &mut len, b"fscat: ");
+                        windemo_push_bytes(&mut line, &mut len, error.as_str().as_bytes());
+                        self.push_line(&line[..len]);
+                    }
+                }
+            }
+            _ => {
+                let mut line = [0u8; DESKTOP_TERMINAL_LINE_LEN];
+                let mut len = 0usize;
+                windemo_push_bytes(&mut line, &mut len, b"unknown command: ");
+                windemo_push_bytes(&mut line, &mut len, token.as_bytes());
+                self.push_line(&line[..len]);
+            }
+        }
+    }
+
+    fn draw(
+        &mut self,
+        pixels: &mut [u32],
+        width: usize,
+        height: usize,
+        app: DesktopAppSpec,
+        tick: u32,
+        focused: bool,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        multdemo_fill_gradient_vertical(pixels, width, height, app.fill_a, app.fill_b);
+        desktop_draw_border(
+            pixels,
+            width,
+            height,
+            ui::Rect::new(0, 0, width as i32, height as i32),
+            app.stripe,
+        );
+
+        multdemo_fill_rect(pixels, width, height, 0, 0, width as i32, 22, app.background);
+        desktop_draw_text(
+            pixels,
+            width,
+            height,
+            8,
+            6,
+            "Terminal",
+            0xEAF3FF,
+            app.background,
+        );
+
+        let font_h = desktop_font_height().max(8);
+        let line_start_y = 28;
+        let input_y = (height as i32).saturating_sub(font_h + 6).max(line_start_y);
+        let usable_h = input_y.saturating_sub(line_start_y);
+        let visible_lines = (usable_h / font_h).max(0) as usize;
+        let start = self.count.saturating_sub(visible_lines);
+
+        for row in 0..visible_lines {
+            let logical = start + row;
+            let Some(line) = self.line_at(logical) else {
+                continue;
+            };
+            let y = line_start_y + row as i32 * font_h;
+            desktop_draw_text_bytes(pixels, width, height, 8, y, line, 0xD7E9FF, app.fill_b);
+        }
+
+        multdemo_fill_rect(pixels, width, height, 0, input_y - 2, width as i32, font_h + 6, 0x0A1A2E);
+        let mut input_line = [0u8; DESKTOP_TERMINAL_LINE_LEN + 2];
+        let mut input_len = 0usize;
+        windemo_push_bytes(&mut input_line, &mut input_len, b"> ");
+        windemo_push_bytes(&mut input_line, &mut input_len, &self.input[..self.input_len]);
+        desktop_draw_text_bytes(
+            pixels,
+            width,
+            height,
+            8,
+            input_y + 1,
+            &input_line[..input_len],
+            0xF4FAFF,
+            0x0A1A2E,
+        );
+
+        let show_cursor = focused && ((tick / 20) & 1) == 0;
+        if show_cursor {
+            let cursor_x = 8 + (input_len as i32 * 8);
+            multdemo_fill_rect(
+                pixels,
+                width,
+                height,
+                cursor_x,
+                input_y + 1,
+                1,
+                font_h,
+                0x8BD8FF,
+            );
+        }
+    }
+}
+
+struct DesktopFilesState {
+    entries: [fs::FileInfo; DESKTOP_FILES_MAX],
+    entry_count: usize,
+    selected: Option<usize>,
+    scroll: usize,
+    preview: [u8; DESKTOP_FILES_PREVIEW_MAX],
+    preview_len: usize,
+    status: [u8; DESKTOP_STATUS_TEXT_MAX],
+    status_len: usize,
+}
+
+impl DesktopFilesState {
+    fn new() -> Self {
+        let mut state = Self {
+            entries: [fs::FileInfo::empty(); DESKTOP_FILES_MAX],
+            entry_count: 0,
+            selected: None,
+            scroll: 0,
+            preview: [0; DESKTOP_FILES_PREVIEW_MAX],
+            preview_len: 0,
+            status: [0; DESKTOP_STATUS_TEXT_MAX],
+            status_len: 0,
+        };
+        state.refresh();
+        state
+    }
+
+    fn set_status(&mut self, text: &str) {
+        desktop_set_message(&mut self.status, &mut self.status_len, text);
+    }
+
+    fn refresh(&mut self) {
+        match fs::list(&mut self.entries) {
+            Ok(count) => {
+                self.entry_count = count.min(self.entries.len());
+                if self.entry_count == 0 {
+                    self.selected = None;
+                    self.preview_len = 0;
+                    self.scroll = 0;
+                    self.set_status("no files");
+                    return;
+                }
+
+                if self.selected.is_none_or(|index| index >= self.entry_count) {
+                    self.selected = Some(0);
+                }
+                let mut line = [0u8; DESKTOP_STATUS_TEXT_MAX];
+                let mut len = 0usize;
+                windemo_push_bytes(&mut line, &mut len, b"files: ");
+                windemo_push_u32(&mut line, &mut len, self.entry_count as u32);
+                if let Ok(text) = str::from_utf8(&line[..len]) {
+                    self.set_status(text);
+                }
+                if let Some(index) = self.selected {
+                    self.load_preview(index);
+                }
+            }
+            Err(error) => {
+                self.entry_count = 0;
+                self.selected = None;
+                self.preview_len = 0;
+                self.scroll = 0;
+                let mut line = [0u8; DESKTOP_STATUS_TEXT_MAX];
+                let mut len = 0usize;
+                windemo_push_bytes(&mut line, &mut len, b"fs error: ");
+                windemo_push_bytes(&mut line, &mut len, error.as_str().as_bytes());
+                if let Ok(text) = str::from_utf8(&line[..len]) {
+                    self.set_status(text);
+                }
+            }
+        }
+    }
+
+    fn clamp_scroll(&mut self, visible_rows: usize) {
+        let visible = visible_rows.max(1);
+        if self.selected.is_some_and(|selected| selected < self.scroll) {
+            self.scroll = self.selected.unwrap_or(0);
+        }
+        if let Some(selected) = self.selected {
+            if selected >= self.scroll.saturating_add(visible) {
+                self.scroll = selected.saturating_add(1).saturating_sub(visible);
+            }
+        }
+
+        if self.scroll >= self.entry_count {
+            self.scroll = self.entry_count.saturating_sub(1);
+        }
+    }
+
+    fn select(&mut self, index: usize) {
+        if index >= self.entry_count {
+            return;
+        }
+        self.selected = Some(index);
+        self.load_preview(index);
+    }
+
+    fn load_preview(&mut self, index: usize) {
+        self.preview_len = 0;
+        if index >= self.entry_count {
+            return;
+        }
+
+        let mut buffer = [0u8; DESKTOP_FILES_PREVIEW_MAX];
+        match fs::read_file(self.entries[index].name_str(), &mut buffer) {
+            Ok(result) => {
+                self.preview_len = desktop_copy_sanitized_ascii(
+                    &mut self.preview,
+                    &buffer[..result.copied_size.min(buffer.len())],
+                );
+                let mut line = [0u8; DESKTOP_STATUS_TEXT_MAX];
+                let mut len = 0usize;
+                windemo_push_bytes(&mut line, &mut len, b"preview ");
+                windemo_push_u32(&mut line, &mut len, result.total_size.min(u32::MAX as usize) as u32);
+                windemo_push_bytes(&mut line, &mut len, b" bytes");
+                if let Ok(text) = str::from_utf8(&line[..len]) {
+                    self.set_status(text);
+                }
+            }
+            Err(error) => {
+                let mut line = [0u8; DESKTOP_STATUS_TEXT_MAX];
+                let mut len = 0usize;
+                windemo_push_bytes(&mut line, &mut len, b"read failed: ");
+                windemo_push_bytes(&mut line, &mut len, error.as_str().as_bytes());
+                if let Ok(text) = str::from_utf8(&line[..len]) {
+                    self.set_status(text);
+                }
+            }
+        }
+    }
+
+    fn delete_selected(&mut self) {
+        let Some(index) = self.selected else {
+            self.set_status("select a file first");
+            return;
+        };
+        if index >= self.entry_count {
+            self.selected = None;
+            self.set_status("select a file first");
+            return;
+        }
+
+        let delete_result = fs::delete_file(self.entries[index].name_str());
+        match delete_result {
+            Ok(()) => {
+                self.refresh();
+                self.set_status("file deleted");
+            }
+            Err(error) => {
+                let mut line = [0u8; DESKTOP_STATUS_TEXT_MAX];
+                let mut len = 0usize;
+                windemo_push_bytes(&mut line, &mut len, b"delete failed: ");
+                windemo_push_bytes(&mut line, &mut len, error.as_str().as_bytes());
+                if let Ok(text) = str::from_utf8(&line[..len]) {
+                    self.set_status(text);
+                }
+            }
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> bool {
+        match key {
+            KeyEvent::Up => {
+                if self.entry_count == 0 {
+                    return false;
+                }
+                let current = self.selected.unwrap_or(0);
+                let next = current.saturating_sub(1);
+                self.select(next);
+                true
+            }
+            KeyEvent::Down => {
+                if self.entry_count == 0 {
+                    return false;
+                }
+                let current = self.selected.unwrap_or(0);
+                let next = (current + 1).min(self.entry_count.saturating_sub(1));
+                self.select(next);
+                true
+            }
+            KeyEvent::PageUp => {
+                self.scroll = self.scroll.saturating_sub(6);
+                true
+            }
+            KeyEvent::PageDown => {
+                self.scroll = self.scroll.saturating_add(6);
+                true
+            }
+            KeyEvent::Char('r') | KeyEvent::Char('R') => {
+                self.refresh();
+                true
+            }
+            KeyEvent::Char('d') | KeyEvent::Char('D') => {
+                self.delete_selected();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_mouse_down(&mut self, local_x: i32, local_y: i32, width: usize, height: usize) -> bool {
+        let layout = desktop_files_layout(width, height);
+        if layout.refresh_button.contains(local_x, local_y) {
+            self.refresh();
+            return true;
+        }
+        if layout.delete_button.contains(local_x, local_y) {
+            self.delete_selected();
+            return true;
+        }
+
+        if !layout.list_rect.contains(local_x, local_y) {
+            return false;
+        }
+
+        let font_h = desktop_font_height().max(8);
+        let row_h = font_h + 2;
+        let row = ((local_y.saturating_sub(layout.list_rect.y)) / row_h).max(0) as usize;
+        let index = self.scroll.saturating_add(row);
+        if index < self.entry_count {
+            self.select(index);
+            return true;
+        }
+        false
+    }
+
+    fn handle_event(&mut self, event: InputEvent, client_rect: ui::Rect) -> bool {
+        match event {
+            InputEvent::KeyPress { key } => self.handle_key(key),
+            InputEvent::MouseDown {
+                button: MouseButton::Left,
+                ..
+            } => {
+                let Some((local_x, local_y)) = desktop_mouse_local(event, client_rect) else {
+                    return false;
+                };
+                self.handle_mouse_down(
+                    local_x,
+                    local_y,
+                    client_rect.width.max(0) as usize,
+                    client_rect.height.max(0) as usize,
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn draw(
+        &mut self,
+        pixels: &mut [u32],
+        width: usize,
+        height: usize,
+        app: DesktopAppSpec,
+        _tick: u32,
+        _focused: bool,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        multdemo_fill_gradient_vertical(pixels, width, height, app.fill_a, app.fill_b);
+        desktop_draw_border(
+            pixels,
+            width,
+            height,
+            ui::Rect::new(0, 0, width as i32, height as i32),
+            app.stripe,
+        );
+
+        let layout = desktop_files_layout(width, height);
+        multdemo_fill_rect(
+            pixels,
+            width,
+            height,
+            0,
+            0,
+            width as i32,
+            26,
+            app.background,
+        );
+        desktop_draw_border(pixels, width, height, layout.refresh_button, 0x6FA57A);
+        desktop_draw_border(pixels, width, height, layout.delete_button, 0xB67777);
+        desktop_draw_text(
+            pixels,
+            width,
+            height,
+            layout.refresh_button.x + 8,
+            layout.refresh_button.y + 4,
+            "Refresh",
+            0xE7F4EA,
+            app.background,
+        );
+        desktop_draw_text(
+            pixels,
+            width,
+            height,
+            layout.delete_button.x + 10,
+            layout.delete_button.y + 4,
+            "Delete",
+            0xFFE4E4,
+            app.background,
+        );
+
+        desktop_draw_border(pixels, width, height, layout.list_rect, 0x5B7F61);
+        desktop_draw_border(pixels, width, height, layout.preview_rect, 0x5B7F61);
+        multdemo_fill_rect(
+            pixels,
+            width,
+            height,
+            layout.list_rect.x + 1,
+            layout.list_rect.y + 1,
+            layout.list_rect.width.saturating_sub(2),
+            layout.list_rect.height.saturating_sub(2),
+            0x132617,
+        );
+        multdemo_fill_rect(
+            pixels,
+            width,
+            height,
+            layout.preview_rect.x + 1,
+            layout.preview_rect.y + 1,
+            layout.preview_rect.width.saturating_sub(2),
+            layout.preview_rect.height.saturating_sub(2),
+            0x122012,
+        );
+
+        let font_h = desktop_font_height().max(8);
+        let row_h = font_h + 2;
+        let visible_rows = (layout.list_rect.height / row_h).max(1) as usize;
+        self.clamp_scroll(visible_rows);
+
+        for row in 0..visible_rows {
+            let index = self.scroll.saturating_add(row);
+            if index >= self.entry_count {
+                break;
+            }
+            let y = layout.list_rect.y + row as i32 * row_h;
+            let selected = self.selected == Some(index);
+            if selected {
+                multdemo_fill_rect(
+                    pixels,
+                    width,
+                    height,
+                    layout.list_rect.x + 1,
+                    y,
+                    layout.list_rect.width.saturating_sub(2),
+                    row_h,
+                    0x254E2D,
+                );
+            }
+
+            let file = self.entries[index];
+            desktop_draw_text(
+                pixels,
+                width,
+                height,
+                layout.list_rect.x + 6,
+                y + 1,
+                file.name_str(),
+                if selected { 0xF3FFF6 } else { 0xC5E4CB },
+                if selected { 0x254E2D } else { 0x132617 },
+            );
+            let mut size = [0u8; 16];
+            let mut size_len = 0usize;
+            windemo_push_u32(&mut size, &mut size_len, file.size_bytes);
+            windemo_push_bytes(&mut size, &mut size_len, b"b");
+            let size_x = layout
+                .list_rect
+                .x
+                .saturating_add(layout.list_rect.width)
+                .saturating_sub(52);
+            desktop_draw_text_bytes(
+                pixels,
+                width,
+                height,
+                size_x,
+                y + 1,
+                &size[..size_len],
+                0x95BDA0,
+                if selected { 0x254E2D } else { 0x132617 },
+            );
+        }
+
+        desktop_draw_text(
+            pixels,
+            width,
+            height,
+            layout.preview_rect.x + 6,
+            layout.preview_rect.y + 3,
+            "Preview",
+            0xE2F2E5,
+            0x122012,
+        );
+        let preview_y = layout.preview_rect.y + font_h + 6;
+        let preview_cols = ((layout.preview_rect.width.saturating_sub(10)) / 8).max(1) as usize;
+        let preview_rows = ((layout.preview_rect.height.saturating_sub(font_h + 10)) / font_h).max(1) as usize;
+        let mut offset = 0usize;
+        for row in 0..preview_rows {
+            if offset >= self.preview_len {
+                break;
+            }
+            let chunk = (self.preview_len - offset).min(preview_cols);
+            let y = preview_y + row as i32 * font_h;
+            desktop_draw_text_bytes(
+                pixels,
+                width,
+                height,
+                layout.preview_rect.x + 6,
+                y,
+                &self.preview[offset..offset + chunk],
+                0xB9D3BE,
+                0x122012,
+            );
+            offset += chunk;
+        }
+
+        multdemo_fill_rect(
+            pixels,
+            width,
+            height,
+            layout.status_rect.x,
+            layout.status_rect.y,
+            layout.status_rect.width,
+            layout.status_rect.height,
+            0x142117,
+        );
+        desktop_draw_border(pixels, width, height, layout.status_rect, 0x5B7F61);
+
+        if let Ok(text) = str::from_utf8(&self.status[..self.status_len]) {
+            let max_chars = ((layout.status_rect.width.saturating_sub(12)) / 8).max(0) as usize;
+            let clipped = desktop_trim_text(text, max_chars);
+            desktop_draw_text(
+                pixels,
+                width,
+                height,
+                layout.status_rect.x + 6,
+                layout.status_rect.y + 4,
+                clipped,
+                0xBEDBC5,
+                0x142117,
+            );
+        }
+    }
+}
+
+struct DesktopMonitorState {
+    frame_ticks: [u32; DESKTOP_MONITOR_HISTORY],
+    frame_head: usize,
+    frame_count: usize,
+    last_tick: u32,
+}
+
+impl DesktopMonitorState {
+    fn new(start_tick: u32) -> Self {
+        Self {
+            frame_ticks: [1; DESKTOP_MONITOR_HISTORY],
+            frame_head: 0,
+            frame_count: 0,
+            last_tick: start_tick,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.frame_head = 0;
+        self.frame_count = 0;
+    }
+
+    fn push_frame_delta(&mut self, delta: u32) {
+        self.frame_ticks[self.frame_head] = delta.max(1);
+        self.frame_head = (self.frame_head + 1) % DESKTOP_MONITOR_HISTORY;
+        if self.frame_count < DESKTOP_MONITOR_HISTORY {
+            self.frame_count += 1;
+        }
+    }
+
+    fn frame_delta_at(&self, logical_index: usize) -> u32 {
+        if logical_index >= self.frame_count {
+            return 1;
+        }
+        let oldest = if self.frame_count < DESKTOP_MONITOR_HISTORY {
+            0
+        } else {
+            self.frame_head
+        };
+        let index = (oldest + logical_index) % DESKTOP_MONITOR_HISTORY;
+        self.frame_ticks[index].max(1)
+    }
+
+    fn sample(&mut self, tick: u32) {
+        let delta = tick.wrapping_sub(self.last_tick).max(1);
+        self.last_tick = tick;
+        self.push_frame_delta(delta);
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> bool {
+        if matches!(key, KeyEvent::Char('R')) {
+            self.reset();
+            return true;
+        }
+        false
+    }
+
+    fn draw(
+        &mut self,
+        pixels: &mut [u32],
+        width: usize,
+        height: usize,
+        app: DesktopAppSpec,
+        tick: u32,
+        _focused: bool,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        self.sample(tick);
+        multdemo_fill_gradient_vertical(pixels, width, height, app.fill_a, app.fill_b);
+        desktop_draw_border(
+            pixels,
+            width,
+            height,
+            ui::Rect::new(0, 0, width as i32, height as i32),
+            app.stripe,
+        );
+
+        let panel = ui::Rect::new(8, 8, (width as i32).saturating_sub(16).max(1), 92);
+        multdemo_fill_rect(
+            pixels,
+            width,
+            height,
+            panel.x,
+            panel.y,
+            panel.width,
+            panel.height,
+            0x21160D,
+        );
+        desktop_draw_border(pixels, width, height, panel, 0x8A6A42);
+
+        let up = timer::uptime();
+        let hz = timer::frequency_hz().max(1);
+        let heap = allocator::stats();
+        let fs_info = fs::info();
+        let mouse_state = mouse::state();
+        let latest_delta = self.frame_delta_at(self.frame_count.saturating_sub(1)).max(1);
+        let fps = hz.saturating_div(latest_delta).max(1);
+        let frame_ms = (latest_delta as u64).saturating_mul(1000) / hz as u64;
+
+        let mut line = [0u8; 96];
+        let mut len = 0usize;
+        windemo_push_bytes(&mut line, &mut len, b"uptime ");
+        windemo_push_u32(&mut line, &mut len, up.seconds.min(u32::MAX as u64) as u32);
+        windemo_push_bytes(&mut line, &mut len, b"s  fps ");
+        windemo_push_u32(&mut line, &mut len, fps);
+        windemo_push_bytes(&mut line, &mut len, b"  frame ");
+        windemo_push_u32(&mut line, &mut len, frame_ms.min(u32::MAX as u64) as u32);
+        windemo_push_bytes(&mut line, &mut len, b"ms");
+        desktop_draw_text_bytes(
+            pixels,
+            width,
+            height,
+            panel.x + 8,
+            panel.y + 8,
+            &line[..len],
+            0xFFE6BD,
+            0x21160D,
+        );
+
+        len = 0;
+        windemo_push_bytes(&mut line, &mut len, b"heap ");
+        windemo_push_u32(&mut line, &mut len, heap.used.min(u32::MAX as usize) as u32);
+        windemo_push_bytes(&mut line, &mut len, b"/");
+        windemo_push_u32(&mut line, &mut len, heap.total.min(u32::MAX as usize) as u32);
+        windemo_push_bytes(&mut line, &mut len, b"  input drops ");
+        windemo_push_u32(&mut line, &mut len, input::dropped_event_count());
+        desktop_draw_text_bytes(
+            pixels,
+            width,
+            height,
+            panel.x + 8,
+            panel.y + 24,
+            &line[..len],
+            0xE8D2AD,
+            0x21160D,
+        );
+
+        len = 0;
+        windemo_push_bytes(&mut line, &mut len, b"mouse ");
+        windemo_push_i32(&mut line, &mut len, mouse_state.x);
+        windemo_push_bytes(&mut line, &mut len, b",");
+        windemo_push_i32(&mut line, &mut len, mouse_state.y);
+        windemo_push_bytes(&mut line, &mut len, b"  fs ");
+        windemo_push_bytes(
+            &mut line,
+            &mut len,
+            if fs_info.mounted { b"mounted" } else { b"offline" },
+        );
+        windemo_push_bytes(&mut line, &mut len, b" files=");
+        windemo_push_u32(&mut line, &mut len, fs_info.file_count);
+        desktop_draw_text_bytes(
+            pixels,
+            width,
+            height,
+            panel.x + 8,
+            panel.y + 40,
+            &line[..len],
+            0xDDBF93,
+            0x21160D,
+        );
+
+        let graph = ui::Rect::new(
+            8,
+            panel.y.saturating_add(panel.height).saturating_add(8),
+            (width as i32).saturating_sub(16).max(1),
+            (height as i32)
+                .saturating_sub(panel.y.saturating_add(panel.height).saturating_add(16))
+                .max(1),
+        );
+        multdemo_fill_rect(pixels, width, height, graph.x, graph.y, graph.width, graph.height, 0x160E08);
+        desktop_draw_border(pixels, width, height, graph, 0x74593A);
+
+        let bars = (graph.width / 3).max(1) as usize;
+        let samples = self.frame_count.min(bars);
+        if samples == 0 {
+            return;
+        }
+
+        let start = self.frame_count.saturating_sub(samples);
+        for offset in 0..samples {
+            let sample = self.frame_delta_at(start + offset).max(1);
+            let fps = hz.saturating_div(sample).max(1);
+            let bar_h = ((fps.min(hz) as u64 * graph.height.max(1) as u64) / hz.max(1) as u64) as i32;
+            let x = graph.x + 2 + offset as i32 * 3;
+            let y = graph.y.saturating_add(graph.height).saturating_sub(bar_h).saturating_sub(1);
+            multdemo_fill_rect(
+                pixels,
+                width,
+                height,
+                x,
+                y,
+                2,
+                bar_h.max(1),
+                if fps > hz / 2 { 0xFFCD72 } else { 0xA46A2E },
+            );
+        }
+    }
+}
+
+struct DesktopNotesState {
+    lines: [[u8; DESKTOP_NOTES_LINE_LEN]; DESKTOP_NOTES_MAX_LINES],
+    line_lens: [usize; DESKTOP_NOTES_MAX_LINES],
+    line_count: usize,
+    cursor_line: usize,
+    cursor_col: usize,
+    scroll: usize,
+    status: [u8; DESKTOP_STATUS_TEXT_MAX],
+    status_len: usize,
+    dirty: bool,
+}
+
+impl DesktopNotesState {
+    fn new() -> Self {
+        let mut state = Self {
+            lines: [[0; DESKTOP_NOTES_LINE_LEN]; DESKTOP_NOTES_MAX_LINES],
+            line_lens: [0; DESKTOP_NOTES_MAX_LINES],
+            line_count: 1,
+            cursor_line: 0,
+            cursor_col: 0,
+            scroll: 0,
+            status: [0; DESKTOP_STATUS_TEXT_MAX],
+            status_len: 0,
+            dirty: false,
+        };
+        state.load_from_disk();
+        state
+    }
+
+    fn set_status(&mut self, text: &str) {
+        desktop_set_message(&mut self.status, &mut self.status_len, text);
+    }
+
+    fn reset_document(&mut self) {
+        self.lines = [[0; DESKTOP_NOTES_LINE_LEN]; DESKTOP_NOTES_MAX_LINES];
+        self.line_lens = [0; DESKTOP_NOTES_MAX_LINES];
+        self.line_count = 1;
+        self.cursor_line = 0;
+        self.cursor_col = 0;
+        self.scroll = 0;
+        self.dirty = false;
+    }
+
+    fn ensure_cursor_bounds(&mut self) {
+        if self.line_count == 0 {
+            self.line_count = 1;
+        }
+        if self.cursor_line >= self.line_count {
+            self.cursor_line = self.line_count - 1;
+        }
+        self.cursor_col = self.cursor_col.min(self.line_lens[self.cursor_line]);
+    }
+
+    fn load_from_disk(&mut self) {
+        let mut buffer = [0u8; DESKTOP_NOTES_SAVE_MAX];
+        match fs::read_file(DESKTOP_NOTES_FILE, &mut buffer) {
+            Ok(result) => {
+                self.reset_document();
+                self.line_count = 0;
+                let mut line = 0usize;
+                let mut col = 0usize;
+                for byte in buffer[..result.copied_size].iter().copied() {
+                    if line >= DESKTOP_NOTES_MAX_LINES {
+                        break;
+                    }
+                    match byte {
+                        b'\r' => {}
+                        b'\n' => {
+                            self.line_lens[line] = col;
+                            line += 1;
+                            col = 0;
+                        }
+                        value => {
+                            if col < DESKTOP_NOTES_LINE_LEN {
+                                self.lines[line][col] = sanitize_editor_byte(value);
+                                col += 1;
+                            }
+                        }
+                    }
+                }
+                if line < DESKTOP_NOTES_MAX_LINES {
+                    self.line_lens[line] = col;
+                    line += 1;
+                }
+                self.line_count = line.max(1);
+                self.cursor_line = 0;
+                self.cursor_col = 0;
+                self.scroll = 0;
+                self.dirty = false;
+                self.set_status("notes loaded");
+            }
+            Err(fs::FsError::NotFound) => {
+                self.reset_document();
+                self.set_status("new note");
+            }
+            Err(error) => {
+                self.reset_document();
+                let mut line = [0u8; DESKTOP_STATUS_TEXT_MAX];
+                let mut len = 0usize;
+                windemo_push_bytes(&mut line, &mut len, b"load failed: ");
+                windemo_push_bytes(&mut line, &mut len, error.as_str().as_bytes());
+                if let Ok(text) = str::from_utf8(&line[..len]) {
+                    self.set_status(text);
+                }
+            }
+        }
+    }
+
+    fn save_to_disk(&mut self) {
+        let mut output = [0u8; DESKTOP_NOTES_SAVE_MAX];
+        let mut cursor = 0usize;
+        for line in 0..self.line_count {
+            let len = self.line_lens[line];
+            let Some(end) = cursor.checked_add(len) else {
+                self.set_status("save failed: note too large");
+                return;
+            };
+            if end > output.len() {
+                self.set_status("save failed: note too large");
+                return;
+            }
+            output[cursor..end].copy_from_slice(&self.lines[line][..len]);
+            cursor = end;
+            if line + 1 < self.line_count {
+                if cursor >= output.len() {
+                    self.set_status("save failed: note too large");
+                    return;
+                }
+                output[cursor] = b'\n';
+                cursor += 1;
+            }
+        }
+
+        match fs::write_file(DESKTOP_NOTES_FILE, &output[..cursor]) {
+            Ok(()) => {
+                self.dirty = false;
+                self.set_status("saved notes.txt");
+            }
+            Err(error) => {
+                let mut line = [0u8; DESKTOP_STATUS_TEXT_MAX];
+                let mut len = 0usize;
+                windemo_push_bytes(&mut line, &mut len, b"save failed: ");
+                windemo_push_bytes(&mut line, &mut len, error.as_str().as_bytes());
+                if let Ok(text) = str::from_utf8(&line[..len]) {
+                    self.set_status(text);
+                }
+            }
+        }
+    }
+
+    fn insert_char(&mut self, byte: u8) -> bool {
+        self.ensure_cursor_bounds();
+        let line = self.cursor_line;
+        let len = self.line_lens[line];
+        if len >= DESKTOP_NOTES_LINE_LEN {
+            return false;
+        }
+
+        if self.cursor_col < len {
+            for idx in (self.cursor_col..len).rev() {
+                self.lines[line][idx + 1] = self.lines[line][idx];
+            }
+        }
+
+        self.lines[line][self.cursor_col] = sanitize_editor_byte(byte);
+        self.line_lens[line] += 1;
+        self.cursor_col += 1;
+        self.dirty = true;
+        true
+    }
+
+    fn insert_newline(&mut self) -> bool {
+        self.ensure_cursor_bounds();
+        if self.line_count >= DESKTOP_NOTES_MAX_LINES {
+            self.set_status("line limit reached");
+            return false;
+        }
+
+        for idx in (self.cursor_line + 1..=self.line_count).rev() {
+            self.lines[idx] = self.lines[idx - 1];
+            self.line_lens[idx] = self.line_lens[idx - 1];
+        }
+
+        let old_line = self.cursor_line;
+        let old_len = self.line_lens[old_line];
+        let split = self.cursor_col.min(old_len);
+        let tail_len = old_len.saturating_sub(split);
+        let mut tail = [0u8; DESKTOP_NOTES_LINE_LEN];
+        tail[..tail_len].copy_from_slice(&self.lines[old_line][split..split + tail_len]);
+
+        self.line_lens[old_line] = split;
+        self.lines[old_line][split..].fill(0);
+
+        let new_line = old_line + 1;
+        self.lines[new_line].fill(0);
+        self.lines[new_line][..tail_len].copy_from_slice(&tail[..tail_len]);
+        self.line_lens[new_line] = tail_len;
+
+        self.line_count += 1;
+        self.cursor_line = new_line;
+        self.cursor_col = 0;
+        self.dirty = true;
+        true
+    }
+
+    fn backspace(&mut self) -> bool {
+        self.ensure_cursor_bounds();
+        if self.cursor_col > 0 {
+            let line = self.cursor_line;
+            let len = self.line_lens[line];
+            let remove = self.cursor_col - 1;
+            for idx in remove..len.saturating_sub(1) {
+                self.lines[line][idx] = self.lines[line][idx + 1];
+            }
+            self.line_lens[line] = len.saturating_sub(1);
+            self.cursor_col -= 1;
+            self.dirty = true;
+            return true;
+        }
+
+        if self.cursor_line == 0 {
+            return false;
+        }
+
+        let current = self.cursor_line;
+        let previous = current - 1;
+        let prev_len = self.line_lens[previous];
+        let cur_len = self.line_lens[current];
+        if prev_len + cur_len > DESKTOP_NOTES_LINE_LEN {
+            self.set_status("line too long to merge");
+            return false;
+        }
+
+        let mut tail = [0u8; DESKTOP_NOTES_LINE_LEN];
+        tail[..cur_len].copy_from_slice(&self.lines[current][..cur_len]);
+        self.lines[previous][prev_len..prev_len + cur_len].copy_from_slice(&tail[..cur_len]);
+        self.line_lens[previous] = prev_len + cur_len;
+
+        for idx in current..self.line_count.saturating_sub(1) {
+            self.lines[idx] = self.lines[idx + 1];
+            self.line_lens[idx] = self.line_lens[idx + 1];
+        }
+        self.line_count = self.line_count.saturating_sub(1).max(1);
+        self.cursor_line = previous;
+        self.cursor_col = prev_len;
+        self.dirty = true;
+        true
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> bool {
+        match key {
+            KeyEvent::Char('\n') => self.insert_newline(),
+            KeyEvent::Char('\x08') => self.backspace(),
+            KeyEvent::Char(ch) if is_printable(ch) => self.insert_char(ch as u8),
+            KeyEvent::Left => {
+                if self.cursor_col > 0 {
+                    self.cursor_col -= 1;
+                } else if self.cursor_line > 0 {
+                    self.cursor_line -= 1;
+                    self.cursor_col = self.line_lens[self.cursor_line];
+                }
+                true
+            }
+            KeyEvent::Right => {
+                let len = self.line_lens[self.cursor_line];
+                if self.cursor_col < len {
+                    self.cursor_col += 1;
+                } else if self.cursor_line + 1 < self.line_count {
+                    self.cursor_line += 1;
+                    self.cursor_col = 0;
+                }
+                true
+            }
+            KeyEvent::Up => {
+                if self.cursor_line > 0 {
+                    self.cursor_line -= 1;
+                    self.cursor_col = self.cursor_col.min(self.line_lens[self.cursor_line]);
+                }
+                true
+            }
+            KeyEvent::Down => {
+                if self.cursor_line + 1 < self.line_count {
+                    self.cursor_line += 1;
+                    self.cursor_col = self.cursor_col.min(self.line_lens[self.cursor_line]);
+                }
+                true
+            }
+            KeyEvent::PageUp => {
+                self.scroll = self.scroll.saturating_sub(8);
+                true
+            }
+            KeyEvent::PageDown => {
+                self.scroll = self.scroll.saturating_add(8);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_mouse_down(&mut self, local_x: i32, local_y: i32, width: usize, height: usize) -> bool {
+        let layout = desktop_notes_layout(width, height);
+        if layout.save_button.contains(local_x, local_y) {
+            self.save_to_disk();
+            return true;
+        }
+        if layout.load_button.contains(local_x, local_y) {
+            self.load_from_disk();
+            return true;
+        }
+        if layout.clear_button.contains(local_x, local_y) {
+            self.reset_document();
+            self.set_status("cleared");
+            return true;
+        }
+
+        if !layout.editor_rect.contains(local_x, local_y) {
+            return false;
+        }
+
+        let font_h = desktop_font_height().max(8);
+        let row = ((local_y.saturating_sub(layout.editor_rect.y)) / font_h).max(0) as usize;
+        let col = ((local_x.saturating_sub(layout.editor_rect.x).saturating_sub(4)) / 8).max(0) as usize;
+        let line = (self.scroll + row).min(self.line_count.saturating_sub(1));
+        self.cursor_line = line;
+        self.cursor_col = col.min(self.line_lens[line]);
+        true
+    }
+
+    fn handle_event(&mut self, event: InputEvent, client_rect: ui::Rect) -> bool {
+        match event {
+            InputEvent::KeyPress { key } => self.handle_key(key),
+            InputEvent::MouseDown {
+                button: MouseButton::Left,
+                ..
+            } => {
+                let Some((local_x, local_y)) = desktop_mouse_local(event, client_rect) else {
+                    return false;
+                };
+                self.handle_mouse_down(
+                    local_x,
+                    local_y,
+                    client_rect.width.max(0) as usize,
+                    client_rect.height.max(0) as usize,
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn draw(
+        &mut self,
+        pixels: &mut [u32],
+        width: usize,
+        height: usize,
+        app: DesktopAppSpec,
+        tick: u32,
+        focused: bool,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        multdemo_fill_gradient_vertical(pixels, width, height, app.fill_a, app.fill_b);
+        desktop_draw_border(
+            pixels,
+            width,
+            height,
+            ui::Rect::new(0, 0, width as i32, height as i32),
+            app.stripe,
+        );
+
+        let layout = desktop_notes_layout(width, height);
+        multdemo_fill_rect(
+            pixels,
+            width,
+            height,
+            0,
+            0,
+            width as i32,
+            26,
+            app.background,
+        );
+        desktop_draw_border(pixels, width, height, layout.save_button, 0xB285C2);
+        desktop_draw_border(pixels, width, height, layout.load_button, 0xB285C2);
+        desktop_draw_border(pixels, width, height, layout.clear_button, 0xB285C2);
+        desktop_draw_text(
+            pixels,
+            width,
+            height,
+            layout.save_button.x + 11,
+            layout.save_button.y + 4,
+            "Save",
+            0xFFE9FF,
+            app.background,
+        );
+        desktop_draw_text(
+            pixels,
+            width,
+            height,
+            layout.load_button.x + 11,
+            layout.load_button.y + 4,
+            "Load",
+            0xFFE9FF,
+            app.background,
+        );
+        desktop_draw_text(
+            pixels,
+            width,
+            height,
+            layout.clear_button.x + 8,
+            layout.clear_button.y + 4,
+            "Clear",
+            0xFFE9FF,
+            app.background,
+        );
+
+        multdemo_fill_rect(
+            pixels,
+            width,
+            height,
+            layout.editor_rect.x,
+            layout.editor_rect.y,
+            layout.editor_rect.width,
+            layout.editor_rect.height,
+            0x2B1D2E,
+        );
+        desktop_draw_border(pixels, width, height, layout.editor_rect, 0xA16CB4);
+
+        let font_h = desktop_font_height().max(8);
+        let visible_rows = (layout.editor_rect.height / font_h).max(1) as usize;
+        if self.cursor_line < self.scroll {
+            self.scroll = self.cursor_line;
+        }
+        if self.cursor_line >= self.scroll.saturating_add(visible_rows) {
+            self.scroll = self.cursor_line.saturating_add(1).saturating_sub(visible_rows);
+        }
+        if self.scroll >= self.line_count {
+            self.scroll = self.line_count.saturating_sub(1);
+        }
+
+        for row in 0..visible_rows {
+            let line_index = self.scroll.saturating_add(row);
+            if line_index >= self.line_count {
+                break;
+            }
+            let y = layout.editor_rect.y + row as i32 * font_h;
+            let bg = if line_index % 2 == 0 { 0x2B1D2E } else { 0x311F35 };
+            multdemo_fill_rect(
+                pixels,
+                width,
+                height,
+                layout.editor_rect.x + 1,
+                y,
+                layout.editor_rect.width.saturating_sub(2),
+                font_h,
+                bg,
+            );
+            desktop_draw_text_bytes(
+                pixels,
+                width,
+                height,
+                layout.editor_rect.x + 4,
+                y,
+                &self.lines[line_index][..self.line_lens[line_index]],
+                0xF8E7FF,
+                bg,
+            );
+        }
+
+        let show_cursor = focused && ((tick / 20) & 1) == 0;
+        if show_cursor && self.cursor_line >= self.scroll && self.cursor_line < self.scroll + visible_rows {
+            let cursor_x = layout
+                .editor_rect
+                .x
+                .saturating_add(4)
+                .saturating_add(self.cursor_col as i32 * 8);
+            let cursor_y = layout
+                .editor_rect
+                .y
+                .saturating_add((self.cursor_line - self.scroll) as i32 * font_h);
+            multdemo_fill_rect(
+                pixels,
+                width,
+                height,
+                cursor_x,
+                cursor_y,
+                1,
+                font_h,
+                0xFFE3FF,
+            );
+        }
+
+        let dirty_suffix = if self.dirty { " *" } else { "" };
+        let mut status = [0u8; DESKTOP_STATUS_TEXT_MAX];
+        let mut len = 0usize;
+        windemo_push_bytes(&mut status, &mut len, &self.status[..self.status_len]);
+        windemo_push_bytes(&mut status, &mut len, dirty_suffix.as_bytes());
+        multdemo_fill_rect(
+            pixels,
+            width,
+            height,
+            layout.status_rect.x,
+            layout.status_rect.y,
+            layout.status_rect.width,
+            layout.status_rect.height,
+            0x2A1B2D,
+        );
+        desktop_draw_border(pixels, width, height, layout.status_rect, 0xA16CB4);
+        if let Ok(text) = str::from_utf8(&status[..len]) {
+            let max_chars = ((layout.status_rect.width.saturating_sub(12)) / 8).max(0) as usize;
+            let clipped = desktop_trim_text(text, max_chars);
+            desktop_draw_text(
+                pixels,
+                width,
+                height,
+                layout.status_rect.x + 6,
+                layout.status_rect.y + 4,
+                clipped,
+                0xE2C9EA,
+                0x2A1B2D,
+            );
+        }
+    }
+}
+
+struct DesktopPaintState {
+    canvas: [u32; DESKTOP_PAINT_CANVAS_PIXELS],
+    color_index: usize,
+    drawing: bool,
+    drawing_window: Option<ui::WindowId>,
+    last_point: Option<(usize, usize)>,
+}
+
+impl DesktopPaintState {
+    fn new() -> Self {
+        Self {
+            canvas: [0xF2F2F2; DESKTOP_PAINT_CANVAS_PIXELS],
+            color_index: 0,
+            drawing: false,
+            drawing_window: None,
+            last_point: None,
+        }
+    }
+
+    fn on_window_closed(&mut self, id: ui::WindowId) {
+        if self.drawing_window == Some(id) {
+            self.end_stroke();
+        }
+    }
+
+    fn end_stroke(&mut self) -> bool {
+        if !self.drawing && self.last_point.is_none() && self.drawing_window.is_none() {
+            return false;
+        }
+        self.drawing = false;
+        self.drawing_window = None;
+        self.last_point = None;
+        true
+    }
+
+    fn clear_canvas(&mut self) {
+        self.canvas.fill(0xF2F2F2);
+    }
+
+    fn paint_color(&self) -> u32 {
+        DESKTOP_PAINT_PALETTE[self
+            .color_index
+            .min(DESKTOP_PAINT_PALETTE.len().saturating_sub(1))]
+    }
+
+    fn set_canvas_pixel(&mut self, x: i32, y: i32, color: u32) {
+        if x < 0 || y < 0 || x >= DESKTOP_PAINT_CANVAS_W as i32 || y >= DESKTOP_PAINT_CANVAS_H as i32 {
+            return;
+        }
+        let index = y as usize * DESKTOP_PAINT_CANVAS_W + x as usize;
+        if index < self.canvas.len() {
+            self.canvas[index] = color;
+        }
+    }
+
+    fn draw_canvas_line(&mut self, start: (usize, usize), end: (usize, usize), color: u32) {
+        let mut x0 = start.0 as i32;
+        let mut y0 = start.1 as i32;
+        let x1 = end.0 as i32;
+        let y1 = end.1 as i32;
+
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+
+        loop {
+            self.set_canvas_pixel(x0, y0, color);
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let e2 = err.saturating_mul(2);
+            if e2 >= dy {
+                err = err.saturating_add(dy);
+                x0 = x0.saturating_add(sx);
+            }
+            if e2 <= dx {
+                err = err.saturating_add(dx);
+                y0 = y0.saturating_add(sy);
+            }
+        }
+    }
+
+    fn layout_canvas_coord(layout: DesktopPaintLayout, local_x: i32, local_y: i32) -> Option<(usize, usize)> {
+        if !layout.canvas_rect.contains(local_x, local_y) {
+            return None;
+        }
+
+        let scale = layout.scale.max(1);
+        let cx = (local_x.saturating_sub(layout.canvas_rect.x) / scale) as usize;
+        let cy = (local_y.saturating_sub(layout.canvas_rect.y) / scale) as usize;
+        if cx >= DESKTOP_PAINT_CANVAS_W || cy >= DESKTOP_PAINT_CANVAS_H {
+            return None;
+        }
+        Some((cx, cy))
+    }
+
+    fn handle_mouse_down(
+        &mut self,
+        window_id: ui::WindowId,
+        local_x: i32,
+        local_y: i32,
+        width: usize,
+        height: usize,
+    ) -> bool {
+        let layout = desktop_paint_layout(width, height);
+        if layout.clear_button.contains(local_x, local_y) {
+            self.clear_canvas();
+            self.end_stroke();
+            return true;
+        }
+
+        for (index, swatch) in layout.palette.iter().enumerate() {
+            if swatch.contains(local_x, local_y) {
+                self.color_index = index;
+                return true;
+            }
+        }
+
+        let Some(point) = Self::layout_canvas_coord(layout, local_x, local_y) else {
+            return false;
+        };
+
+        let color = self.paint_color();
+        self.set_canvas_pixel(point.0 as i32, point.1 as i32, color);
+        self.drawing = true;
+        self.drawing_window = Some(window_id);
+        self.last_point = Some(point);
+        true
+    }
+
+    fn handle_mouse_move(
+        &mut self,
+        window_id: ui::WindowId,
+        local_x: i32,
+        local_y: i32,
+        width: usize,
+        height: usize,
+    ) -> bool {
+        if !self.drawing || self.drawing_window != Some(window_id) {
+            return false;
+        }
+
+        let layout = desktop_paint_layout(width, height);
+        let Some(point) = Self::layout_canvas_coord(layout, local_x, local_y) else {
+            return false;
+        };
+
+        let color = self.paint_color();
+        if let Some(previous) = self.last_point {
+            self.draw_canvas_line(previous, point, color);
+        } else {
+            self.set_canvas_pixel(point.0 as i32, point.1 as i32, color);
+        }
+        self.last_point = Some(point);
+        true
+    }
+
+    fn handle_event(&mut self, event: InputEvent, window_id: ui::WindowId, client_rect: ui::Rect) -> bool {
+        match event {
+            InputEvent::KeyPress {
+                key: KeyEvent::Char('c'),
+            }
+            | InputEvent::KeyPress {
+                key: KeyEvent::Char('C'),
+            } => {
+                self.clear_canvas();
+                true
+            }
+            InputEvent::MouseDown {
+                button: MouseButton::Left,
+                ..
+            } => {
+                let Some((local_x, local_y)) = desktop_mouse_local(event, client_rect) else {
+                    return false;
+                };
+                self.handle_mouse_down(
+                    window_id,
+                    local_x,
+                    local_y,
+                    client_rect.width.max(0) as usize,
+                    client_rect.height.max(0) as usize,
+                )
+            }
+            InputEvent::MouseMove { .. } => {
+                let Some((local_x, local_y)) = desktop_mouse_local(event, client_rect) else {
+                    return false;
+                };
+                self.handle_mouse_move(
+                    window_id,
+                    local_x,
+                    local_y,
+                    client_rect.width.max(0) as usize,
+                    client_rect.height.max(0) as usize,
+                )
+            }
+            InputEvent::MouseUp {
+                button: MouseButton::Left,
+                ..
+            } => self.end_stroke(),
+            _ => false,
+        }
+    }
+
+    fn draw(
+        &mut self,
+        pixels: &mut [u32],
+        width: usize,
+        height: usize,
+        app: DesktopAppSpec,
+        _tick: u32,
+        _focused: bool,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        multdemo_fill_gradient_vertical(pixels, width, height, app.fill_a, app.fill_b);
+        desktop_draw_border(
+            pixels,
+            width,
+            height,
+            ui::Rect::new(0, 0, width as i32, height as i32),
+            app.stripe,
+        );
+
+        let layout = desktop_paint_layout(width, height);
+        multdemo_fill_rect(
+            pixels,
+            width,
+            height,
+            0,
+            0,
+            width as i32,
+            26,
+            app.background,
+        );
+
+        for (index, swatch) in layout.palette.iter().enumerate() {
+            multdemo_fill_rect(
+                pixels,
+                width,
+                height,
+                swatch.x,
+                swatch.y,
+                swatch.width,
+                swatch.height,
+                DESKTOP_PAINT_PALETTE[index],
+            );
+            desktop_draw_border(
+                pixels,
+                width,
+                height,
+                *swatch,
+                if index == self.color_index {
+                    0xFFFFFF
+                } else {
+                    0x1E1E1E
+                },
+            );
+        }
+
+        multdemo_fill_rect(
+            pixels,
+            width,
+            height,
+            layout.clear_button.x,
+            layout.clear_button.y,
+            layout.clear_button.width,
+            layout.clear_button.height,
+            0x213048,
+        );
+        desktop_draw_border(pixels, width, height, layout.clear_button, 0x8AB4FF);
+        desktop_draw_text(
+            pixels,
+            width,
+            height,
+            layout.clear_button.x + 8,
+            layout.clear_button.y + 4,
+            "Clear",
+            0xEBF3FF,
+            0x213048,
+        );
+
+        multdemo_fill_rect(
+            pixels,
+            width,
+            height,
+            layout.canvas_rect.x,
+            layout.canvas_rect.y,
+            layout.canvas_rect.width,
+            layout.canvas_rect.height,
+            0xDCDCDC,
+        );
+        desktop_draw_border(pixels, width, height, layout.canvas_rect, 0x4A618A);
+
+        let scale = layout.scale.max(1) as usize;
+        for cy in 0..DESKTOP_PAINT_CANVAS_H {
+            for sy in 0..scale {
+                let py = layout.canvas_rect.y + (cy * scale + sy) as i32;
+                if py < 0 || py >= height as i32 {
+                    continue;
+                }
+                let row_offset = py as usize * width;
+                for cx in 0..DESKTOP_PAINT_CANVAS_W {
+                    let color = self.canvas[cy * DESKTOP_PAINT_CANVAS_W + cx];
+                    let px0 = layout.canvas_rect.x + (cx * scale) as i32;
+                    for sx in 0..scale {
+                        let px = px0 + sx as i32;
+                        if px < 0 || px >= width as i32 {
+                            continue;
+                        }
+                        pixels[row_offset + px as usize] = color;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn desktop_paint_running_windows(
+    manager: &mut ui::WindowManager,
+    running_windows: &[Option<ui::WindowId>; DESKTOP_APP_COUNT],
+    apps: &mut DesktopApps,
+    tick: u32,
+) {
+    let focused = manager.focused_window();
+    for (app_index, window_id) in running_windows.iter().enumerate() {
+        let Some(id) = *window_id else {
+            continue;
+        };
+        desktop_paint_window(manager, id, app_index, apps, tick, focused == Some(id));
+    }
+}
+
+fn desktop_paint_window(
+    manager: &mut ui::WindowManager,
+    id: ui::WindowId,
+    app_index: usize,
+    apps: &mut DesktopApps,
+    tick: u32,
+    focused: bool,
+) {
+    let app = DESKTOP_APP_REGISTRY[app_index];
+    match app_index {
+        DESKTOP_APP_TERMINAL => {
+            let _ = manager.with_window_buffer_mut(id, |pixels, width, height| {
+                apps.terminal
+                    .draw(pixels, width, height, app, tick, focused);
+            });
+        }
+        DESKTOP_APP_FILES => {
+            let _ = manager.with_window_buffer_mut(id, |pixels, width, height| {
+                apps.files.draw(pixels, width, height, app, tick, focused);
+            });
+        }
+        DESKTOP_APP_MONITOR => {
+            let _ = manager.with_window_buffer_mut(id, |pixels, width, height| {
+                apps.monitor
+                    .draw(pixels, width, height, app, tick, focused);
+            });
+        }
+        DESKTOP_APP_NOTES => {
+            let _ = manager.with_window_buffer_mut(id, |pixels, width, height| {
+                apps.notes.draw(pixels, width, height, app, tick, focused);
+            });
+        }
+        DESKTOP_APP_PAINT => {
+            let _ = manager.with_window_buffer_mut(id, |pixels, width, height| {
+                apps.paint.draw(pixels, width, height, app, tick, focused);
+            });
+        }
+        _ => {}
+    }
+}
+
+fn desktop_draw_scene(
+    manager: &ui::WindowManager,
+    layout: &DesktopLayout,
+    launcher_open: bool,
+    tick: u32,
+) {
+    vga::begin_draw_batch();
+    desktop_draw_background(layout.desktop_bounds, tick);
+    manager.compose_windows();
+    desktop_draw_taskbar(layout, launcher_open);
+    if launcher_open {
+        desktop_draw_launcher(layout);
+    }
+    vga::end_draw_batch();
+}
+
+fn desktop_draw_background(bounds: ui::Rect, tick: u32) {
+    if bounds.width <= 0 || bounds.height <= 0 {
+        return;
+    }
+
+    let h = bounds.height.max(1);
+    for row in 0..h {
+        let t = ((row as u32).saturating_mul(255) / (h as u32)) as u8;
+        let color = desktop_blend_color(0x102746, 0x070E1A, t);
+        let _ = vga::draw_horizontal_line(bounds.x, bounds.y + row, bounds.width, color);
+    }
+
+    let diagonal_step = 96;
+    let drift = ((tick >> 1) as i32).rem_euclid(diagonal_step);
+    let mut diag_x = bounds
+        .x
+        .saturating_sub(bounds.height)
+        .saturating_add(drift);
+    let diag_limit = bounds.x.saturating_add(bounds.width);
+    while diag_x < diag_limit {
+        let _ = vga::draw_line(
+            diag_x,
+            bounds.y.saturating_add(bounds.height).saturating_sub(1),
+            diag_x.saturating_add(bounds.height),
+            bounds.y,
+            0x12304E,
+        );
+        diag_x = diag_x.saturating_add(diagonal_step);
+    }
+
+    let mut y = bounds.y.saturating_add(26);
+    let y_limit = bounds.y.saturating_add(bounds.height);
+    while y < y_limit {
+        let _ = vga::draw_horizontal_line(bounds.x, y, bounds.width, 0x12385A);
+        y = y.saturating_add(34);
+    }
+
+    let mut x = bounds.x.saturating_add(24);
+    let x_limit = bounds.x.saturating_add(bounds.width);
+    while x < x_limit {
+        let _ = vga::draw_vertical_line(x, bounds.y, bounds.height, 0x0F2640);
+        x = x.saturating_add(66);
+    }
+
+    let sway_x = 0;
+    let sway_y = 0;
+
+    let orb_a_x = bounds
+        .x
+        .saturating_add((bounds.width * 3) / 4)
+        .saturating_add(sway_x);
+    let orb_a_y = bounds.y.saturating_add(bounds.height / 3).saturating_add(sway_y);
+    let _ = vga::draw_circle(orb_a_x, orb_a_y, 48, 0x35638E);
+    let _ = vga::draw_circle(orb_a_x, orb_a_y, 82, 0x274B70);
+    let _ = vga::draw_circle(orb_a_x, orb_a_y, 116, 0x1A3658);
+
+    let orb_b_x = bounds
+        .x
+        .saturating_add(bounds.width / 4)
+        .saturating_sub(sway_x / 2);
+    let orb_b_y = bounds
+        .y
+        .saturating_add(bounds.height / 4)
+        .saturating_sub(sway_y / 2);
+    let _ = vga::draw_circle(orb_b_x, orb_b_y, 34, 0x3F6F9A);
+    let _ = vga::draw_circle(orb_b_x, orb_b_y, 58, 0x234766);
+
+}
+
+fn desktop_blend_color(a: u32, b: u32, t: u8) -> u32 {
+    let t = t as u32;
+    let inv = 255u32.saturating_sub(t);
+
+    let ar = (a >> 16) & 0xFF;
+    let ag = (a >> 8) & 0xFF;
+    let ab = a & 0xFF;
+    let br = (b >> 16) & 0xFF;
+    let bg = (b >> 8) & 0xFF;
+    let bb = b & 0xFF;
+
+    let r = (ar.saturating_mul(inv) + br.saturating_mul(t)) / 255;
+    let g = (ag.saturating_mul(inv) + bg.saturating_mul(t)) / 255;
+    let b = (ab.saturating_mul(inv) + bb.saturating_mul(t)) / 255;
+    (r << 16) | (g << 8) | b
+}
+
+fn desktop_draw_taskbar(layout: &DesktopLayout, launcher_open: bool) {
+    let panel = layout.panel_rect;
+    let _ = vga::draw_filled_rect(panel.x, panel.y, panel.width, panel.height, 0x0A101C);
+    let _ = vga::draw_horizontal_line(panel.x, panel.y, panel.width, 0x3B587D);
+    let _ = vga::draw_horizontal_line(
+        panel.x,
+        panel.y.saturating_add(panel.height).saturating_sub(1),
+        panel.width,
+        0x19273B,
+    );
+
+    let start_bg = if launcher_open { 0x2B5684 } else { 0x17314F };
+    let start_border = if launcher_open { 0x79B5FF } else { 0x345579 };
+    let _ = vga::draw_filled_rect(
+        layout.start_button.x,
+        layout.start_button.y,
+        layout.start_button.width,
+        layout.start_button.height,
+        start_bg,
+    );
+    let _ = vga::draw_horizontal_line(
+        layout.start_button.x,
+        layout.start_button.y,
+        layout.start_button.width,
+        start_border,
+    );
+    let _ = vga::draw_horizontal_line(
+        layout.start_button.x,
+        layout.start_button
+            .y
+            .saturating_add(layout.start_button.height)
+            .saturating_sub(1),
+        layout.start_button.width,
+        start_border,
+    );
+    let _ = vga::draw_vertical_line(
+        layout.start_button.x,
+        layout.start_button.y,
+        layout.start_button.height,
+        start_border,
+    );
+    let _ = vga::draw_vertical_line(
+        layout
+            .start_button
+            .x
+            .saturating_add(layout.start_button.width)
+            .saturating_sub(1),
+        layout.start_button.y,
+        layout.start_button.height,
+        start_border,
+    );
+    let _ = vga::draw_text(
+        layout.start_button.x + 14,
+        layout.start_button.y + 4,
+        "Start",
+        0xEAF4FF,
+        start_bg,
+    );
+
+    for button in layout.task_buttons[..layout.task_button_count].iter() {
+        let bg = if button.focused {
+            0x234C74
+        } else if button.minimized {
+            0x1A2333
+        } else {
+            0x1E2C42
+        };
+        let border = if button.focused { 0x82C8FF } else { 0x415874 };
+        let fg = if button.minimized { 0x9EB2CD } else { 0xE1EEFF };
+
+        let _ = vga::draw_filled_rect(button.rect.x, button.rect.y, button.rect.width, button.rect.height, bg);
+        let _ = vga::draw_horizontal_line(button.rect.x, button.rect.y, button.rect.width, border);
+        let _ = vga::draw_horizontal_line(
+            button.rect.x,
+            button.rect.y.saturating_add(button.rect.height).saturating_sub(1),
+            button.rect.width,
+            border,
+        );
+        let _ = vga::draw_vertical_line(button.rect.x, button.rect.y, button.rect.height, border);
+        let _ = vga::draw_vertical_line(
+            button.rect.x.saturating_add(button.rect.width).saturating_sub(1),
+            button.rect.y,
+            button.rect.height,
+            border,
+        );
+
+        let marker = if button.focused { 0x5ED6FF } else { 0x3A4E67 };
+        let _ = vga::draw_filled_rect(
+            button.rect.x + 2,
+            button.rect.y + 2,
+            3,
+            button.rect.height.saturating_sub(4),
+            marker,
+        );
+
+        let max_chars = ((button.rect.width.saturating_sub(14)) / 8).max(0) as usize;
+        let label = desktop_trim_text(button.title, max_chars);
+        let _ = vga::draw_text(button.rect.x + 8, button.rect.y + 4, label, fg, bg);
+    }
+
+    let clock_bg = 0x14283F;
+    let _ = vga::draw_filled_rect(
+        layout.clock_rect.x,
+        layout.clock_rect.y,
+        layout.clock_rect.width,
+        layout.clock_rect.height,
+        clock_bg,
+    );
+    let _ = vga::draw_horizontal_line(
+        layout.clock_rect.x,
+        layout.clock_rect.y,
+        layout.clock_rect.width,
+        0x45688D,
+    );
+    let _ = vga::draw_horizontal_line(
+        layout.clock_rect.x,
+        layout
+            .clock_rect
+            .y
+            .saturating_add(layout.clock_rect.height)
+            .saturating_sub(1),
+        layout.clock_rect.width,
+        0x45688D,
+    );
+    let _ = vga::draw_vertical_line(
+        layout.clock_rect.x,
+        layout.clock_rect.y,
+        layout.clock_rect.height,
+        0x45688D,
+    );
+    let _ = vga::draw_vertical_line(
+        layout
+            .clock_rect
+            .x
+            .saturating_add(layout.clock_rect.width)
+            .saturating_sub(1),
+        layout.clock_rect.y,
+        layout.clock_rect.height,
+        0x45688D,
+    );
+
+    let mut clock_buf = [0u8; 16];
+    let clock_len = desktop_format_clock_text(&mut clock_buf);
+    if let Ok(clock_text) = core::str::from_utf8(&clock_buf[..clock_len]) {
+        let _ = vga::draw_text(
+            layout.clock_rect.x + 10,
+            layout.clock_rect.y + 4,
+            clock_text,
+            0xE5F0FF,
+            clock_bg,
+        );
+    }
+}
+
+fn desktop_draw_launcher(layout: &DesktopLayout) {
+    let panel = layout.launcher_rect;
+    if panel.width <= 0 || panel.height <= 0 {
+        return;
+    }
+
+    let _ = vga::draw_filled_rect(panel.x, panel.y, panel.width, panel.height, 0x101B2D);
+    let _ = vga::draw_horizontal_line(panel.x, panel.y, panel.width, 0x5F83AA);
+    let _ = vga::draw_horizontal_line(
+        panel.x,
+        panel.y.saturating_add(panel.height).saturating_sub(1),
+        panel.width,
+        0x2F4764,
+    );
+    let _ = vga::draw_vertical_line(panel.x, panel.y, panel.height, 0x5F83AA);
+    let _ = vga::draw_vertical_line(
+        panel.x.saturating_add(panel.width).saturating_sub(1),
+        panel.y,
+        panel.height,
+        0x5F83AA,
+    );
+    let _ = vga::draw_text(
+        panel.x + 10,
+        panel.y + 6,
+        "Applications",
+        0xE8F1FF,
+        0x101B2D,
+    );
+
+    for item in layout.launcher_items[..layout.launcher_item_count].iter() {
+        let app = DESKTOP_APP_REGISTRY[item.app_index];
+        let bg = if item.running { 0x1E3653 } else { 0x16273E };
+        let border = if item.running { 0x70A8E2 } else { 0x3C5775 };
+        let status = if item.running { "open" } else { "launch" };
+        let status_x = if item.running {
+            item.rect.x.saturating_add(item.rect.width).saturating_sub(42)
+        } else {
+            item.rect.x.saturating_add(item.rect.width).saturating_sub(58)
+        };
+
+        let _ = vga::draw_filled_rect(item.rect.x, item.rect.y, item.rect.width, item.rect.height, bg);
+        let _ = vga::draw_horizontal_line(item.rect.x, item.rect.y, item.rect.width, border);
+        let _ = vga::draw_horizontal_line(
+            item.rect.x,
+            item.rect.y.saturating_add(item.rect.height).saturating_sub(1),
+            item.rect.width,
+            border,
+        );
+        let _ = vga::draw_text(item.rect.x + 8, item.rect.y + 5, app.name, 0xE4EEFF, bg);
+        let _ = vga::draw_text(status_x, item.rect.y + 5, status, 0xA9C9EE, bg);
+        let _ = vga::draw_text(item.rect.x + 112, item.rect.y + 5, app.description, 0xB4C7DE, bg);
+        let _ = vga::draw_text(item.rect.x + 84, item.rect.y + 5, app.key, 0x86A4C8, bg);
+    }
+}
+
+fn desktop_trim_text(text: &str, max_chars: usize) -> &str {
+    if max_chars == 0 {
+        return "";
+    }
+
+    let mut count = 0usize;
+    let mut end = text.len();
+    for (index, ch) in text.char_indices() {
+        if count == max_chars {
+            end = index;
+            break;
+        }
+        count += 1;
+        end = index + ch.len_utf8();
+    }
+
+    if count < max_chars {
+        text
+    } else {
+        &text[..end]
+    }
+}
+
+fn desktop_clock_now() -> DesktopClock {
+    if let Some(now) = rtc::now() {
+        return DesktopClock {
+            hour: now.hour,
+            minute: now.minute,
+            second: now.second,
+        };
+    }
+
+    let seconds = timer::uptime().seconds as u32;
+    let hour = ((seconds / 3600) % 24) as u8;
+    let minute = ((seconds / 60) % 60) as u8;
+    let second = (seconds % 60) as u8;
+    DesktopClock {
+        hour,
+        minute,
+        second,
+    }
+}
+
+fn desktop_clock_second_key() -> u32 {
+    let clock = desktop_clock_now();
+    (clock.hour as u32)
+        .saturating_mul(3600)
+        .saturating_add((clock.minute as u32).saturating_mul(60))
+        .saturating_add(clock.second as u32)
+}
+
+fn desktop_format_clock_text(buffer: &mut [u8; 16]) -> usize {
+    let clock = desktop_clock_now();
+    let mut len = 0usize;
+    desktop_push_two_digits(buffer, &mut len, clock.hour);
+    windemo_push_bytes(buffer, &mut len, b":");
+    desktop_push_two_digits(buffer, &mut len, clock.minute);
+    windemo_push_bytes(buffer, &mut len, b":");
+    desktop_push_two_digits(buffer, &mut len, clock.second);
+    len
+}
+
+fn desktop_push_two_digits<const N: usize>(buffer: &mut [u8; N], len: &mut usize, value: u8) {
+    if *len + 2 > N {
+        return;
+    }
+    buffer[*len] = b'0' + ((value / 10) % 10);
+    buffer[*len + 1] = b'0' + (value % 10);
+    *len += 2;
 }
 
 #[derive(Clone, Copy)]
